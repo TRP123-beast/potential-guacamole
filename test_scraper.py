@@ -16,11 +16,11 @@ def test_property_search():
     """Test property search functionality"""
     print("🧪 Testing property search...")
     
-    # Test addresses
+    # Test addresses (known Broker Bay properties)
     test_addresses = [
-        "123 Main Street, Toronto, ON M5V 3A8",
-        "456 Queen Street West, Toronto, ON M5V 2A9",
-        "789 Yonge Street, Toronto, ON M4W 2G8"
+        "10 Navy Wharf Court #3209, Toronto, ON",
+        "275 Larch Street #G612, Toronto, ON", 
+        "17 Bathurst Street #4205, Toronto, ON"
     ]
     
     scraper = BrokerBayScraper(headless=True)
@@ -91,7 +91,8 @@ def test_configuration():
         print(f"Min Delay: {Config.MIN_DELAY}")
         print(f"Max Delay: {Config.MAX_DELAY}")
         print(f"User Agents: {len(Config.USER_AGENTS)}")
-        print(f"Captcha API Key: {'Set' if Config.CAPTCHA_API_KEY else 'Not set'}")
+        print(f"Use Existing Session: {Config.USE_EXISTING_SESSION}")
+        print(f"Chrome Profile Path: {Config.CHROME_PROFILE_PATH or 'Not set'}")
         
         print("✅ Configuration test passed")
     

@@ -28,17 +28,17 @@ An advanced, autonomous web scraping system designed specifically for accessing 
 
 ### 🛡️ **Advanced Anti-Detection**
 - **Undetected Chrome Driver**: Bypasses common detection mechanisms
+- **Session Management**: Uses your existing logged-in Chrome session
 - **User Agent Rotation**: Random user agents from a curated pool
 - **Proxy Support**: Rotating proxy servers for IP diversity
 - **Random Delays**: Variable delays between requests (2-5 seconds)
 - **Header Randomization**: Dynamic HTTP headers
-- **Session Management**: Proper session handling and cleanup
 
-### 🤖 **Captcha Solving**
-- **2captcha Integration**: Automatic solving of reCAPTCHA v2 and hCaptcha
-- **Image Captcha Support**: Basic image-based captcha solving
-- **Fallback Handling**: Graceful degradation when solving fails
-- **Cost Optimization**: Efficient captcha solving with retry logic
+### 🔐 **Session Management**
+- **Logged-in Session**: Leverages your existing Broker Bay login
+- **Chrome Profile Integration**: Uses your Chrome profile and cookies
+- **No Login Required**: No need to store credentials
+- **Seamless Experience**: Works with your existing browser session
 
 ### 💾 **Comprehensive Data Management**
 - **SQLite Database**: Robust data persistence
@@ -52,7 +52,7 @@ An advanced, autonomous web scraping system designed specifically for accessing 
 
 - **Python 3.8+** (recommended: Python 3.9+)
 - **Chrome/Chromium Browser** (latest version)
-- **2captcha API Key** (for captcha solving)
+- **Broker Bay Account** (logged in to your Chrome browser)
 - **Virtual Environment** (already set up as 'scrapper')
 
 ### Installation
@@ -97,10 +97,17 @@ chmod +x install.sh
 
 ### Configuration
 
-1. **Edit `.env` file:**
+1. **Setup environment (automated):**
+```bash
+# Run the setup script
+./setup_env.sh
+```
+
+2. **Manual configuration (if needed):**
 ```env
-# Required: 2captcha API key
-CAPTCHA_API_KEY=your_2captcha_api_key_here
+# Session management (for logged-in users)
+USE_EXISTING_SESSION=true
+CHROME_PROFILE_PATH=/home/sasaka-jr/.config/google-chrome/Default
 
 # Optional: Proxy settings
 PROXY_LIST=proxy1:port,proxy2:port,proxy3:port
@@ -117,10 +124,11 @@ DATABASE_URL=sqlite:///broker_bay_scraper.db
 LOG_LEVEL=INFO
 ```
 
-2. **Get 2captcha API Key:**
-   - Visit [2captcha.com](https://2captcha.com)
-   - Create account and add funds
-   - Copy API key to `.env` file
+3. **Ensure you're logged in to Broker Bay:**
+   - Open Chrome browser
+   - Go to [brokerbay.ca](https://brokerbay.ca)
+   - Log in with your credentials
+   - Keep the browser open (optional)
 
 ## 📖 Usage
 
@@ -128,14 +136,16 @@ LOG_LEVEL=INFO
 
 #### Search Properties
 ```bash
-# Basic search
-python3 main.py search "123 Main Street, Toronto, ON M5V 3A8"
+# Test with known Broker Bay properties
+python3 main.py search "10 Navy Wharf Court #3209, Toronto, ON"
+python3 main.py search "275 Larch Street #G612, Toronto, ON"
+python3 main.py search "17 Bathurst Street #4205, Toronto, ON"
 
 # Search with debug logging
-python3 main.py --log-level DEBUG search "456 Queen Street West, Toronto, ON"
+python3 main.py --log-level DEBUG search "10 Navy Wharf Court #3209, Toronto, ON"
 
 # Search in headless mode (default)
-python3 main.py search "789 Yonge Street, Toronto, ON" --headless
+python3 main.py search "275 Larch Street #G612, Toronto, ON" --headless
 ```
 
 #### Book Viewings
@@ -363,7 +373,8 @@ CREATE TABLE search_history (
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `CAPTCHA_API_KEY` | 2captcha API key for solving captchas | - | Yes |
+| `USE_EXISTING_SESSION` | Use existing Chrome session | false | No |
+| `CHROME_PROFILE_PATH` | Path to Chrome profile directory | - | No |
 | `PROXY_LIST` | Comma-separated list of proxy servers | - | No |
 | `MIN_DELAY` | Minimum delay between requests (seconds) | 2 | No |
 | `MAX_DELAY` | Maximum delay between requests (seconds) | 5 | No |
@@ -375,6 +386,10 @@ CREATE TABLE search_history (
 
 ```python
 class Config:
+    # Session management (for logged-in users)
+    USE_EXISTING_SESSION = os.getenv('USE_EXISTING_SESSION', 'false').lower() == 'true'
+    CHROME_PROFILE_PATH = os.getenv('CHROME_PROFILE_PATH', '')
+    
     # Broker Bay URLs
     BASE_URL = "https://www.brokerbay.ca"
     SEARCH_ENDPOINT = "/search"
@@ -591,22 +606,49 @@ save_results_to_file(results, 'search_results.json')
 
 ## 🧪 Testing
 
-### Test Suite
+### Quick Test Setup
 
+1. **Setup environment:**
 ```bash
-# Run all tests
+# Run the automated setup
+./setup_env.sh
+
+# Activate virtual environment
+source scrapper/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+2. **Ensure you're logged in to Broker Bay:**
+   - Open Chrome browser
+   - Go to [brokerbay.ca](https://brokerbay.ca)
+   - Log in with your credentials
+   - Keep the browser open (optional)
+
+3. **Run tests:**
+```bash
+# Run comprehensive test suite
 python3 test_scraper.py
 
 # Test specific components
 python3 -c "from broker_bay_scraper import BrokerBayScraper; print('✅ Import successful')"
 ```
 
+### Test Addresses
+
+The test suite uses these known Broker Bay properties:
+- `10 Navy Wharf Court #3209, Toronto, ON`
+- `275 Larch Street #G612, Toronto, ON`
+- `17 Bathurst Street #4205, Toronto, ON`
+
 ### Test Coverage
 
-- **Unit Tests**: Individual component testing
-- **Integration Tests**: End-to-end workflow testing
-- **Performance Tests**: Load and stress testing
-- **Error Handling**: Exception and edge case testing
+- **Configuration Tests**: Verify environment setup
+- **Database Tests**: Test data persistence
+- **Property Search Tests**: Test with known addresses
+- **Session Management Tests**: Verify logged-in session usage
+- **Error Handling Tests**: Exception and edge case testing
 
 ## 📝 Logging
 

@@ -4,8 +4,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    # Captcha settings
-    CAPTCHA_API_KEY = os.getenv('CAPTCHA_API_KEY', '')
+    # Session management (for logged-in users)
+    USE_EXISTING_SESSION = os.getenv('USE_EXISTING_SESSION', 'false').lower() == 'true'
+    CHROME_PROFILE_PATH = os.getenv('CHROME_PROFILE_PATH', '')
+    CHROME_PROFILE_DIR_NAME = os.getenv('CHROME_PROFILE_DIR_NAME', '')
     
     # Proxy settings
     PROXY_LIST = os.getenv('PROXY_LIST', '').split(',') if os.getenv('PROXY_LIST') else []

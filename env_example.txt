@@ -1,5 +1,6 @@
-# 2captcha API key for solving captchas
-CAPTCHA_API_KEY=your_2captcha_api_key_here
+# Session management (for logged-in users)
+USE_EXISTING_SESSION=true
+CHROME_PROFILE_PATH=/home/sasaka-jr/.config/google-chrome/Default
 
 # Proxy settings (optional)
 PROXY_LIST=proxy1:port,proxy2:port,proxy3:port

@@ -6,7 +6,6 @@ from datetime import datetime
 from broker_bay_scraper import BrokerBayScraper
 from booking_system import BookingSystem
 from data_manager import DataManager
-from captcha_solver import CaptchaSolver
 from selenium_manager import SeleniumManager
 import logging
 
@@ -91,8 +90,7 @@ def book_viewing(property_id: str, date: str, time: str, contact_info: dict, hea
     print(f"   Time: {time}")
     
     selenium_manager = SeleniumManager(headless=headless)
-    captcha_solver = CaptchaSolver()
-    booking_system = BookingSystem(selenium_manager, captcha_solver)
+    booking_system = BookingSystem(selenium_manager)
     data_manager = DataManager()
     
     try:

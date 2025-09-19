@@ -5,12 +5,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from selenium_manager import SeleniumManager
 from property_parser import PropertyParser
-from captcha_solver import CaptchaSolver
 
 class BookingSystem:
-    def __init__(self, selenium_manager: SeleniumManager, captcha_solver: CaptchaSolver):
+    def __init__(self, selenium_manager: SeleniumManager):
         self.selenium_manager = selenium_manager
-        self.captcha_solver = captcha_solver
         self.property_parser = PropertyParser()
         self.logger = logging.getLogger(__name__)
     
@@ -28,11 +26,10 @@ class BookingSystem:
             self.selenium_manager.driver.get(booking_url)
             self.selenium_manager.random_delay(2, 4)
             
-            # Check for captcha
+            # Check for captcha (informational only - user should be logged in)
             if self.selenium_manager.check_for_captcha():
-                self.logger.warning("Captcha detected on booking page")
-                if not self.solve_captcha():
-                    return False
+                self.logger.warning("Captcha detected on booking page - you may need to solve manually")
+                self.logger.info("Continuing with booking...")
             
             # Fill booking form
             booking_success = self.fill_booking_form(property_data, selected_time, contact_info)
@@ -295,41 +292,3 @@ class BookingSystem:
             self.logger.error(f"Error verifying booking: {e}")
             return False
     
-    def solve_captcha(self) -> bool:
-        """Solve captcha on booking page"""
-        try:
-            # Check for reCAPTCHA
-            recaptcha_element = self.selenium_manager.driver.find_element('css', '.g-recaptcha')
-            if recaptcha_element:
-                site_key = recaptcha_element.get_attribute('data-sitekey')
-                if site_key:
-                    solution = self.captcha_solver.solve_recaptcha_v2(
-                        site_key,
-                        self.selenium_manager.driver.current_url
-                    )
-                    if solution:
-                        self.selenium_manager.driver.execute_script(
-                            f"document.getElementById('g-recaptcha-response').innerHTML='{solution}'"
-                        )
-                        return True
-            
-            # Check for hCaptcha
-            hcaptcha_element = self.selenium_manager.driver.find_element('css', '.h-captcha')
-            if hcaptcha_element:
-                site_key = hcaptcha_element.get_attribute('data-sitekey')
-                if site_key:
-                    solution = self.captcha_solver.solve_hcaptcha(
-                        site_key,
-                        self.selenium_manager.driver.current_url
-                    )
-                    if solution:
-                        self.selenium_manager.driver.execute_script(
-                            f"document.querySelector('[name=\"h-captcha-response\"]').value='{solution}'"
-                        )
-                        return True
-            
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Error solving captcha: {e}")
-            return False

@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from selenium_manager import SeleniumManager
 from property_parser import PropertyParser
-from captcha_solver import CaptchaSolver
 from anti_detection import AntiDetection
 from config import Config
 
@@ -13,7 +12,6 @@ class BrokerBayScraper:
     def __init__(self, headless=True):
         self.selenium_manager = SeleniumManager(headless=headless)
         self.property_parser = PropertyParser()
-        self.captcha_solver = CaptchaSolver()
         self.anti_detection = AntiDetection()
         self.setup_logging()
         
@@ -38,23 +36,24 @@ class BrokerBayScraper:
             address_components = self.property_parser.parse_property_address(address)
             self.logger.info(f"Parsed address: {address_components}")
             
-            # Navigate to search page
-            search_url = f"{Config.BASE_URL}{Config.SEARCH_ENDPOINT}"
+            # Navigate to home/search page (data-first approach)
+            search_url = f"{Config.BASE_URL}"
             self.selenium_manager.driver.get(search_url)
             self.selenium_manager.random_delay(2, 4)
             
-            # Check for captcha
+            # Check for captcha (informational only - user should be logged in)
             if self.selenium_manager.check_for_captcha():
-                self.logger.warning("Captcha detected, attempting to solve...")
-                if not self.solve_captcha():
-                    self.logger.error("Failed to solve captcha")
-                    return None
+                self.logger.warning("Captcha detected - you may need to solve manually")
+                self.logger.info("Continuing with scraping...")
             
-            # Fill search form
-            search_success = self.fill_search_form(address_components)
-            if not search_success:
-                self.logger.error("Failed to fill search form")
-                return None
+            # Try to use a single search box if present (omnibox)
+            if not self.try_omnibox_search(address_components['full_address']):
+                # Fallback to structured form
+                search_success = self.fill_search_form(address_components)
+                if not search_success:
+                    self.logger.error("Failed to fill search form")
+                    # As last resort, try site-wide search anchors/links
+                    self.try_sitewide_search(address_components['full_address'])
             
             # Wait for results
             self.selenium_manager.random_delay(3, 5)
@@ -187,6 +186,42 @@ class BrokerBayScraper:
         except Exception as e:
             self.logger.error(f"Error selecting province: {e}")
             return False
+
+    def try_omnibox_search(self, full_address: str) -> bool:
+        """Try a single-input omnibox search and submit."""
+        selectors = [
+            'input[placeholder*="Search"]',
+            'input[type="search"]',
+            'input[aria-label*="Search"]',
+            'input[name*="search"]',
+            'input[class*="search"]'
+        ]
+        for sel in selectors:
+            if self.selenium_manager.safe_send_keys('css', sel, full_address):
+                if self.selenium_manager.safe_click('css', 'button[type="submit"]'):
+                    return True
+                # try Enter key submit
+                try:
+                    elem = self.selenium_manager.wait_for_element('css', sel)
+                    if elem:
+                        elem.submit()
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    def try_sitewide_search(self, full_address: str) -> None:
+        """Fallback: try to navigate via common search links if present."""
+        links = [
+            'a[href*="search"]',
+            'a[href*="listing"]',
+            'a[href*="property"]'
+        ]
+        for l in links:
+            if self.selenium_manager.safe_click('css', l):
+                self.selenium_manager.random_delay(1, 2)
+                self.try_omnibox_search(full_address)
+                break
     
     def parse_search_results(self) -> List[Dict]:
         """Parse search results from the page"""
@@ -199,11 +234,12 @@ class BrokerBayScraper:
                 '.listing-result',
                 '.search-result',
                 '[class*="property"]',
-                '[class*="listing"]'
+                '[class*="listing"]',
+                'a[href*="property"], a[href*="listing"]'
             ]
             
             for selector in result_selectors:
-                elements = self.selenium_manager.driver.find_elements('css', selector)
+                elements = self.selenium_manager.driver.find_elements("css selector", selector)
                 if elements:
                     for element in elements:
                         try:
@@ -241,25 +277,34 @@ class BrokerBayScraper:
                     break
             
             # Extract address
-            address_selectors = ['.address', '.property-address', '[class*="address"]']
+            address_selectors = ['.address', '.property-address', '[class*="address"]', 'a']
             for selector in address_selectors:
-                address_elem = element.find_element('css', selector)
+                try:
+                    address_elem = element.find_element('css selector', selector)
+                except Exception:
+                    continue
                 if address_elem:
-                    result_data['address'] = address_elem.text.strip()
+                    result_data['address'] = (address_elem.text or address_elem.get_attribute('title') or '').strip()
                     break
             
             # Extract price
             price_selectors = ['.price', '.property-price', '[class*="price"]']
             for selector in price_selectors:
-                price_elem = element.find_element('css', selector)
+                try:
+                    price_elem = element.find_element('css selector', selector)
+                except Exception:
+                    continue
                 if price_elem:
                     result_data['price'] = price_elem.text.strip()
                     break
             
             # Extract link
-            link_elem = element.find_element('css', 'a')
-            if link_elem:
-                result_data['link'] = link_elem.get_attribute('href')
+            try:
+                link_elem = element.find_element('css selector', 'a')
+                if link_elem:
+                    result_data['link'] = link_elem.get_attribute('href')
+            except Exception:
+                pass
             
             return result_data
             
@@ -300,11 +345,10 @@ class BrokerBayScraper:
             self.selenium_manager.driver.get(property_url)
             self.selenium_manager.random_delay(2, 4)
             
-            # Check for captcha
+            # Check for captcha (informational only - user should be logged in)
             if self.selenium_manager.check_for_captcha():
-                self.logger.warning("Captcha detected on property page")
-                if not self.solve_captcha():
-                    return None
+                self.logger.warning("Captcha detected on property page - you may need to solve manually")
+                self.logger.info("Continuing with scraping...")
             
             # Get page source and parse
             page_source = self.selenium_manager.get_page_source()
@@ -349,46 +393,6 @@ class BrokerBayScraper:
             self.logger.error(f"Error getting 7-day schedule: {e}")
             return []
     
-    def solve_captcha(self) -> bool:
-        """Solve captcha if present"""
-        try:
-            # Check for reCAPTCHA
-            recaptcha_site_key = self.selenium_manager.driver.find_element('css', '.g-recaptcha')
-            if recaptcha_site_key:
-                site_key = recaptcha_site_key.get_attribute('data-sitekey')
-                if site_key:
-                    solution = self.captcha_solver.solve_recaptcha_v2(
-                        site_key, 
-                        self.selenium_manager.driver.current_url
-                    )
-                    if solution:
-                        # Inject solution
-                        self.selenium_manager.driver.execute_script(
-                            f"document.getElementById('g-recaptcha-response').innerHTML='{solution}'"
-                        )
-                        return True
-            
-            # Check for hCaptcha
-            hcaptcha_element = self.selenium_manager.driver.find_element('css', '.h-captcha')
-            if hcaptcha_element:
-                site_key = hcaptcha_element.get_attribute('data-sitekey')
-                if site_key:
-                    solution = self.captcha_solver.solve_hcaptcha(
-                        site_key,
-                        self.selenium_manager.driver.current_url
-                    )
-                    if solution:
-                        # Inject solution
-                        self.selenium_manager.driver.execute_script(
-                            f"document.querySelector('[name=\"h-captcha-response\"]').value='{solution}'"
-                        )
-                        return True
-            
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Error solving captcha: {e}")
-            return False
     
     def close(self):
         """Close scraper and cleanup"""

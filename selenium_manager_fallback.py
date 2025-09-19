@@ -7,7 +7,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import undetected_chromedriver as uc
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
 from fake_useragent import UserAgent
 from config import Config
 
@@ -19,7 +20,7 @@ class SeleniumManager:
         self.setup_driver()
     
     def setup_driver(self):
-        """Setup undetected Chrome driver with session management"""
+        """Setup Chrome driver with fallback for Python 3.12"""
         options = Options()
         
         if self.headless:
@@ -29,40 +30,17 @@ class SeleniumManager:
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_argument('--disable-extensions')
-        options.add_argument('--disable-plugins')
-        options.add_argument('--disable-web-security')
-        options.add_argument('--allow-running-insecure-content')
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
         
         # Use existing Chrome profile if configured
-        if Config.USE_EXISTING_SESSION:
-            # Defaults
-            default_base = os.path.expanduser("~/.config/google-chrome")
-            user_data_dir = default_base
-            profile_dir = "Default"
-
-            # If both PATH (base dir) and DIR_NAME provided, prefer them as-is
-            if getattr(Config, 'CHROME_PROFILE_PATH', '') and getattr(Config, 'CHROME_PROFILE_DIR_NAME', ''):
-                user_data_dir = Config.CHROME_PROFILE_PATH
-                profile_dir = Config.CHROME_PROFILE_DIR_NAME
-                print(f"Using Chrome base: {user_data_dir}, profile dir: {profile_dir}")
-            elif getattr(Config, 'CHROME_PROFILE_PATH', ''):
-                # If PATH ends with a profile folder (Default or Profile X), split it
-                tail = os.path.basename(Config.CHROME_PROFILE_PATH.rstrip('/'))
-                if tail.lower().startswith('profile') or tail == 'Default':
-                    user_data_dir = os.path.dirname(Config.CHROME_PROFILE_PATH.rstrip('/'))
-                    profile_dir = tail
-                else:
-                    # Treat as base directory only
-                    user_data_dir = Config.CHROME_PROFILE_PATH
-                print(f"Using Chrome base: {user_data_dir}, profile dir: {profile_dir}")
-            elif getattr(Config, 'CHROME_PROFILE_DIR_NAME', ''):
-                user_data_dir = default_base
-                profile_dir = Config.CHROME_PROFILE_DIR_NAME
-                print(f"Using Chrome base: {user_data_dir}, profile dir: {profile_dir}")
-
-            options.add_argument(f'--user-data-dir={user_data_dir}')
-            options.add_argument(f'--profile-directory={profile_dir}')
+        if Config.USE_EXISTING_SESSION and Config.CHROME_PROFILE_PATH:
+            if os.path.exists(Config.CHROME_PROFILE_PATH):
+                options.add_argument(f'--user-data-dir={Config.CHROME_PROFILE_PATH}')
+                print(f"Using existing Chrome profile: {Config.CHROME_PROFILE_PATH}")
+            else:
+                print(f"Chrome profile path not found: {Config.CHROME_PROFILE_PATH}")
+                print("Continuing without existing session...")
         else:
             # Random user agent for new sessions
             user_agent = self.ua.random
@@ -73,12 +51,19 @@ class SeleniumManager:
         height = random.randint(800, 1080)
         options.add_argument(f'--window-size={width},{height}')
         
-        # Disable images for faster loading (optional)
-        # prefs = {"profile.managed_default_content_settings.images": 2}
-        # options.add_experimental_option("prefs", prefs)
+        # Additional anti-detection arguments
+        options.add_argument('--disable-web-security')
+        options.add_argument('--allow-running-insecure-content')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-plugins')
+        options.add_argument('--disable-images')
         
         try:
-            self.driver = uc.Chrome(options=options)
+            # Use webdriver-manager to handle Chrome driver
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
+            
+            # Execute script to remove webdriver property
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
             # Check if we're logged in to Broker Bay
@@ -129,32 +114,11 @@ class SeleniumManager:
         time.sleep(delay)
         return delay
     
-    def _resolve_by(self, by):
-        if isinstance(by, str):
-            b = by.strip().lower()
-            if b in ("css", "css_selector", "selector"):
-                return By.CSS_SELECTOR
-            if b == "xpath":
-                return By.XPATH
-            if b == "id":
-                return By.ID
-            if b == "name":
-                return By.NAME
-            if b in ("class", "class_name"):
-                return By.CLASS_NAME
-            if b in ("tag", "tag_name"):
-                return By.TAG_NAME
-            if b == "link_text":
-                return By.LINK_TEXT
-            if b == "partial_link_text":
-                return By.PARTIAL_LINK_TEXT
-        return by
-
     def wait_for_element(self, by, value, timeout=10):
         """Wait for element to be present and visible"""
         try:
             element = WebDriverWait(self.driver, timeout).until(
-                EC.presence_of_element_located((self._resolve_by(by), value))
+                EC.presence_of_element_located((by, value))
             )
             return element
         except TimeoutException:
@@ -164,7 +128,7 @@ class SeleniumManager:
         """Wait for element to be clickable"""
         try:
             element = WebDriverWait(self.driver, timeout).until(
-                EC.element_to_be_clickable((self._resolve_by(by), value))
+                EC.element_to_be_clickable((by, value))
             )
             return element
         except TimeoutException:

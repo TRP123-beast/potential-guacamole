@@ -21,6 +21,8 @@ function setupDatabase() {
     agent_phone TEXT,
     description TEXT,
     features TEXT,
+    details_json TEXT,
+    rooms_json TEXT,
     url TEXT,
     property_type TEXT,
     year_built INTEGER,
@@ -58,8 +60,8 @@ export function createProperty(propertyData) {
   const db = setupDatabase();
   try {
     const insertStmt = db.prepare(`
-    INSERT INTO properties (property_id, address, price, price_change, status, bedrooms, bathrooms, sqft, listing_date, last_updated, mls_number, agent, agent_phone, description, features, url, property_type, year_built, lot_size, parking_spaces)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    INSERT INTO properties (property_id, address, price, price_change, status, bedrooms, bathrooms, sqft, listing_date, last_updated, mls_number, agent, agent_phone, description, features, details_json, rooms_json, url, property_type, year_built, lot_size, parking_spaces)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
 
     try {
@@ -79,6 +81,8 @@ export function createProperty(propertyData) {
         propertyData.agent_phone,
         propertyData.description,
         propertyData.features,
+        JSON.stringify(propertyData.details_json || {}),
+        JSON.stringify(propertyData.rooms_json || []),
         propertyData.url,
         propertyData.property_type,
         propertyData.year_built,

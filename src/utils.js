@@ -255,6 +255,154 @@ export const loginAndSearch = async (page, searchAddress) => {
   }
 };
 
+// Ensure we are on the dashboard URL and it's loaded
+export const navigateToDashboard = async (page) => {
+  try {
+    const targetUrl = "https://edge.brokerbay.com/#/my_business";
+    if (page.url() !== targetUrl) {
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+    }
+    // Give the SPA time to paint widgets
+    await waitFor(5000);
+    return true;
+  } catch (error) {
+    console.log("❌ Failed to navigate to dashboard:", error.message);
+    return false;
+  }
+};
+
+// Heuristically find the RIGHT-SIDE search input on the dashboard
+export const findRightSideSearchInput = async (page) => {
+  // Candidate selectors commonly used for search inputs
+  const candidateSelectors = [
+    'input[type="search"]',
+    'input[placeholder*="Search" i]',
+    'input[placeholder*="address" i]',
+    'input[name*="search" i]',
+    'input[id*="search" i]',
+    'input[class*="search" i]',
+    'input[name="vendor-search-handler"]',
+    '#vendor-search-handler'
+  ];
+
+  // Try direct selector hits first and pick the right-most visible one
+  for (const selector of candidateSelectors) {
+    try {
+      await page.waitForSelector(selector, { timeout: 2000 });
+      const handles = await page.$$(selector);
+      if (!handles || handles.length === 0) continue;
+
+      let rightMost = null;
+      let rightMostX = -Infinity;
+
+      for (const handle of handles) {
+        const box = await handle.boundingBox();
+        if (!box) continue;
+        // Choose input positioned furthest to the right
+        if (box.x > rightMostX && box.width > 0 && box.height > 0) {
+          rightMost = handle;
+          rightMostX = box.x;
+        }
+      }
+
+      if (rightMost) return rightMost;
+    } catch (_) {
+      // Ignore and continue
+    }
+  }
+
+  // Fallback: scan all inputs and pick the right-most visible one
+  const allInputs = await page.$$('input');
+  let rightMost = null;
+  let rightMostX = -Infinity;
+  for (const handle of allInputs) {
+    const type = await handle.evaluate((el) => (el.getAttribute('type') || '').toLowerCase());
+    if (type && !['text', 'search'].includes(type)) continue;
+    const box = await handle.boundingBox();
+    if (!box) continue;
+    if (box.x > rightMostX && box.width > 0 && box.height > 0) {
+      rightMost = handle;
+      rightMostX = box.x;
+    }
+  }
+  return rightMost;
+};
+
+// Perform a dashboard search in the right-hand search bar, scrape, then wait 60s
+export const performDashboardSearch = async (page, searchQuery) => {
+  try {
+    console.log("📍 Navigating to dashboard for search...");
+    const onDash = await navigateToDashboard(page);
+    if (!onDash) return false;
+
+    console.log("🔎 Locating right-side search input...");
+    const searchInput = await findRightSideSearchInput(page);
+    if (!searchInput) {
+      console.log("❌ Right-side search input not found");
+      return false;
+    }
+
+    await searchInput.click({ clickCount: 3 });
+    // Clear input value
+    await searchInput.evaluate((input) => {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await searchInput.type(searchQuery, { delay: 20 });
+    await page.keyboard.press('Enter');
+    console.log(`➡️ Submitted search for: ${searchQuery}`);
+
+    // Wait for results to appear (best-effort, broad selectors)
+    const resultSelectors = [
+      '[data-testid*="result" i]',
+      '[class*="result" i]',
+      '[class*="search" i] li',
+      'ul[role="listbox"] li',
+      'div[role="listbox"] [role="option"]',
+      '.ant-select-item',
+      '.ant-list-item',
+    ];
+
+    let resultsAppeared = false;
+    for (const sel of resultSelectors) {
+      try {
+        await page.waitForSelector(sel, { timeout: 8000 });
+        resultsAppeared = true;
+        break;
+      } catch (_) {
+        // try next
+      }
+    }
+
+    if (!resultsAppeared) {
+      console.log("⚠️ No explicit results container detected; proceeding after delay...");
+      await waitFor(5000);
+    }
+
+    // Attempt a lightweight scrape of visible result items
+    const scraped = await page.evaluate(() => {
+      const items = [];
+      const candidates = Array.from(document.querySelectorAll('[data-testid*="result" i], [class*="result" i], [class*="search" i] li, ul[role="listbox"] li, div[role="listbox"] [role="option"], .ant-select-item, .ant-list-item'));
+      for (const node of candidates.slice(0, 20)) {
+        const text = node.textContent ? node.textContent.trim().replace(/\s+/g, ' ') : '';
+        if (text) items.push(text);
+      }
+      return items;
+    });
+
+    console.log(`🧾 Scraped ${scraped.length} result item(s)`);
+    if (scraped.length) {
+      scraped.slice(0, 10).forEach((t, i) => console.log(`  ${i + 1}. ${t}`));
+    }
+
+    return true;
+  } catch (error) {
+    console.log("❌ performDashboardSearch failed:", error.message);
+    return false;
+  }
+};
+
 export const sendPropertyToAnalysis = async (property) => {
   try {
     const response = await axios.post(`${process.env.API_URL}/property`, property, {

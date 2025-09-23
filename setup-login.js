@@ -37,7 +37,7 @@ async function setupLogin() {
     const page = await browser.newPage();
     
     // Navigate to Broker Bay
-    await page.goto("https://brokerbay.ca");
+    await page.goto("https://edge.brokerbay.com/#/my_business");
     await new Promise(resolve => setTimeout(resolve, 3000));
     
     console.log("🌐 Opened Broker Bay. Please log in manually in the browser window.");

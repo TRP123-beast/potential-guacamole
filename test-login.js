@@ -3,7 +3,8 @@
 import { configDotenv } from "dotenv";
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { loginToBrokerBay, waitFor } from "./src/utils.js";
+import { loginToBrokerBay, waitFor, performDashboardSearch } from "./src/utils.js";
+import { clickFirstResultAndScrape } from "./src/property-scraper/ClickAndScrape.js";
 
 puppeteer.use(StealthPlugin());
 configDotenv();
@@ -37,8 +38,19 @@ async function testLogin() {
       console.log("✅ Login test successful!");
       console.log(`🌐 Current URL: ${page.url()}`);
       
-      // Wait a bit to see the dashboard
-      await waitFor(5000);
+      // Run dashboard search on the RIGHT search bar
+      const searchQuery = process.argv[2] || process.env.SEARCH_QUERY || "123 Main St";
+      console.log(`🔎 Performing dashboard search for: ${searchQuery}`);
+      const searchOk = await performDashboardSearch(page, searchQuery);
+      if (!searchOk) {
+        console.log("⚠️ Dashboard search did not complete successfully");
+      }
+
+      // Click the first result, scrape, save, and write txt report
+      const saved = await clickFirstResultAndScrape(page, browser, searchQuery);
+      if (saved) {
+        console.log("✅ Scrape complete and saved:", saved.property_id);
+      }
       
       // Take a screenshot
       await page.screenshot({ path: 'brokerbay-dashboard.png', fullPage: true });

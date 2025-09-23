@@ -81,6 +81,56 @@ export const readPropertyDetails = async (globalBrowser, propertyUrl) => {
         return '';
       };
 
+      // Scrape key-value detail tables on the right side (Listing Details / Property Details)
+      const collectDetailTables = () => {
+        const details = {};
+        const tables = Array.from(document.querySelectorAll('table, .ant-descriptions, .details, .property-details'));
+        for (const table of tables) {
+          const rows = table.querySelectorAll('tr');
+          if (rows && rows.length) {
+            rows.forEach((row) => {
+              const ths = row.querySelectorAll('th, .ant-descriptions-item-label');
+              const tds = row.querySelectorAll('td, .ant-descriptions-item-content');
+              if (ths.length && tds.length) {
+                const key = (ths[0].textContent || '').trim().replace(/\s+/g, ' ');
+                const val = (tds[0].textContent || '').trim().replace(/\s+/g, ' ');
+                if (key) details[key] = val;
+              }
+            });
+          }
+        }
+        // Also capture two-column definition lists often used in BrokerBay
+        const labels = Array.from(document.querySelectorAll('.ant-col-8, .label'));
+        labels.forEach((labelNode) => {
+          const key = (labelNode.textContent || '').trim();
+          if (!key) return;
+          const contentNode = labelNode.parentElement && (labelNode.parentElement.querySelector('.ant-col-16, .value') || labelNode.nextElementSibling);
+          if (contentNode) {
+            const val = (contentNode.textContent || '').trim().replace(/\s+/g, ' ');
+            if (val) details[key] = val;
+          }
+        });
+        return details;
+      };
+
+      // Scrape rooms table at the bottom
+      const collectRooms = () => {
+        const rows = [];
+        const tableCandidates = Array.from(document.querySelectorAll('table'));
+        for (const t of tableCandidates) {
+          const headers = Array.from(t.querySelectorAll('thead th')).map((n) => (n.textContent || '').trim().toLowerCase());
+          if (headers.join('|').includes('room') && headers.join('|').includes('level')) {
+            const bodyRows = Array.from(t.querySelectorAll('tbody tr'));
+            for (const r of bodyRows) {
+              const cells = Array.from(r.querySelectorAll('td')).map((n) => (n.textContent || '').trim().replace(/\s+/g, ' '));
+              rows.push(cells);
+            }
+            break;
+          }
+        }
+        return rows;
+      };
+
       const address = getTextContent([
         'h1',
         '[data-testid="address"]',
@@ -200,7 +250,9 @@ export const readPropertyDetails = async (globalBrowser, propertyUrl) => {
         year_built: yearBuilt,
         lot_size: lotSize,
         parking_spaces: parkingSpaces,
-        status: status || 'Active'
+        status: status || 'Active',
+        details_json: collectDetailTables(),
+        rooms_json: collectRooms()
       };
     });
 
@@ -218,7 +270,10 @@ export const readPropertyDetails = async (globalBrowser, propertyUrl) => {
         address: formatAddress(propertyDetails.address),
         listing_date: new Date().toISOString(),
         last_updated: new Date().toISOString(),
-        url: propertyUrl
+        url: propertyUrl,
+        // Ensure JSON string storage for details/rooms when persisted
+        details_json: propertyDetails.details_json || {},
+        rooms_json: propertyDetails.rooms_json || []
       };
     }
 

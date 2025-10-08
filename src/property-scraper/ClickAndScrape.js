@@ -3,12 +3,12 @@ import fs from "fs/promises";
 import path from "path";
 import { waitFor } from "../utils.js";
 import { readPropertyDetails } from "./ReadPropertyDetails.js";
-import { createProperty } from "../ReadAndSaveData.js";
+import { createProperty, createShowingAppointment } from "../ReadAndSaveData.js";
+import { scrapeShowingPage } from "./ScrapeShowingPage.js";
 
 configDotenv();
 
-// Click the first visible search result item under the dashboard search bar,
-// navigate to its details page, scrape, persist, and write a txt report.
+// Click the "Book Showing" or "Request Showing" button and scrape the appointment page
 export async function clickFirstResultAndScrape(page, browser, searchQuery) {
   try {
     // Ensure the dashboard search modal is open and focused
@@ -44,298 +44,390 @@ export async function clickFirstResultAndScrape(page, browser, searchQuery) {
         el.dispatchEvent(new Event('input', { bubbles: true }));
       });
       await inputHandle.type(searchQuery, { delay: 20 });
-      await waitFor(500);
+      console.log("⏳ Waiting for search results to load dynamically...");
+      await waitFor(3000); // Increased wait time for dynamic content
     }
 
-    // Strategy 1: Coordinate-based clicking below search button
-    let previousUrl = page.url();
-    let success = false;
+    // Wait specifically for the search results modal to appear and load
+    console.log("🔍 Waiting for search results modal to appear...");
+    try {
+      await page.waitForSelector('[role="dialog"], .ant-modal, .ant-drawer', { timeout: 8000 });
+      console.log("✅ Search results modal detected");
+      
+      // Wait for the actual search results to load inside the modal
+      await page.waitForFunction(() => {
+        const modal = document.querySelector('[role="dialog"], .ant-modal, .ant-drawer');
+        if (!modal) return false;
+        
+        // Look for property listings or buttons inside the modal
+        const hasListings = modal.querySelector('.ant-list-item, [class*="list"] [class*="item"], [class*="result"]');
+        const hasButtons = modal.querySelector('button, a');
+        return hasListings || hasButtons;
+      }, { timeout: 10000 });
+      
+      console.log("✅ Search results content loaded");
+    } catch (error) {
+      console.log("⚠️ Search results modal not detected, proceeding anyway...");
+    }
+
+    console.log("🔍 Looking for 'Book Showing' or 'Request Showing' buttons...");
+    
+    // Strategy 1: Look for "Book Showing" button
+    let showingButton = null;
+    let buttonText = '';
     
     try {
-      // Find the search button and click below it
-      const searchButton = await page.$('[data-cy="open-search-button"]');
-      if (searchButton) {
-        const buttonBox = await searchButton.boundingBox();
-        if (buttonBox) {
-          // Click 50-100px below the search button, slightly to the right
-          const clickX = buttonBox.x + buttonBox.width / 2;
-          const clickY = buttonBox.y + buttonBox.height + 80; // 80px below button
-          
-          console.log(`🎯 Clicking at coordinates: ${clickX}, ${clickY}`);
-          await page.mouse.click(clickX, clickY, { delay: 100 });
-          await waitFor(1000);
-          
-          // Check if URL changed
-          const newUrl = page.url();
-          if (newUrl !== previousUrl) {
-            console.log('✅ Coordinate click successful - URL changed');
-            success = true;
-          } else {
-            console.log('⚠️ Coordinate click - no URL change, trying alternative coordinates');
-            // Try clicking a bit more to the right
-            await page.mouse.click(clickX + 50, clickY, { delay: 100 });
-            await waitFor(1000);
-            if (page.url() !== previousUrl) {
-              console.log('✅ Alternative coordinate click successful');
-              success = true;
+      // Debug: Take a screenshot to see what's on the page
+      await page.screenshot({ path: 'debug-search-results.png', fullPage: true });
+      console.log("📸 Debug screenshot saved as 'debug-search-results.png'");
+      
+      // Debug: Log all buttons on the page
+      const allButtons = await page.$$('button, a');
+      console.log(`🔍 Found ${allButtons.length} buttons/links on the page`);
+      
+      for (let i = 0; i < Math.min(allButtons.length, 10); i++) {
+        const button = allButtons[i];
+        const text = await button.evaluate(el => el.textContent.trim());
+        const classes = await button.evaluate(el => el.className);
+        console.log(`  Button ${i + 1}: "${text}" (classes: ${classes})`);
+      }
+      
+      // Look for "Book Showing" button using JavaScript evaluation
+      const bookShowingResult = await page.evaluate(() => {
+        const allButtons = document.querySelectorAll('button, a');
+        for (const button of allButtons) {
+          const text = button.textContent.trim();
+          if (text.includes('Book Showing')) {
+            return { found: true, text: text };
+          }
+        }
+        return { found: false, text: '' };
+      });
+      
+      if (bookShowingResult.found) {
+        // Find the actual button element
+        const allButtons = await page.$$('button, a');
+        for (const button of allButtons) {
+          const text = await button.evaluate(el => el.textContent.trim());
+          if (text.includes('Book Showing')) {
+            showingButton = button;
+            buttonText = text;
+            console.log(`✅ Found "Book Showing" button with text: "${text}"`);
+            break;
+          }
+        }
+      }
+      
+      // If "Book Showing" not found, look for "Request Showing"
+      if (!showingButton) {
+        const requestShowingResult = await page.evaluate(() => {
+          const allButtons = document.querySelectorAll('button, a');
+          for (const button of allButtons) {
+            const text = button.textContent.trim();
+            if (text.includes('Request Showing')) {
+              return { found: true, text: text };
+            }
+          }
+          return { found: false, text: '' };
+        });
+        
+        if (requestShowingResult.found) {
+          // Find the actual button element
+          const allButtons = await page.$$('button, a');
+          for (const button of allButtons) {
+            const text = await button.evaluate(el => el.textContent.trim());
+            if (text.includes('Request Showing')) {
+              showingButton = button;
+              buttonText = text;
+              console.log(`✅ Found "Request Showing" button with text: "${text}"`);
+              break;
             }
           }
         }
       }
-    } catch (e) {
-      console.log('⚠️ Coordinate click failed:', e.message);
-    }
-
-    // Strategy 2: Keyboard navigation (if coordinate click failed)
-    if (!success) {
-      try {
-        await page.keyboard.press('ArrowDown');
-        await waitFor(200);
-        await page.keyboard.press('Enter');
-        await Promise.race([
-          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 }),
-          page.waitForFunction((prev) => window.location.href !== prev, { timeout: 5000 }, previousUrl)
-        ]);
-        console.log('⌨️ Selected first result via keyboard');
-        success = true;
-      } catch (_) {
-        // Try a second attempt with two ArrowDown presses
-        try {
-          await page.keyboard.press('ArrowDown');
-          await waitFor(150);
-          await page.keyboard.press('ArrowDown');
-          await waitFor(150);
-          await page.keyboard.press('Enter');
-          await Promise.race([
-            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 }),
-            page.waitForFunction((prev) => window.location.href !== prev, { timeout: 5000 }, previousUrl)
-          ]);
-          console.log('⌨️ Selected result via keyboard (second attempt)');
-          success = true;
-        } catch (_) {
-          console.log('⚠️ Keyboard navigation failed, continuing to DOM-based strategies');
-        }
-      }
-    }
-
-    // Strategy 3: XPath-based selection (if previous strategies failed)
-    if (!success) {
-      try {
-        // Wait for search results to appear
-        await page.waitForSelector('[role="dialog"], .ant-modal, .ant-drawer', { timeout: 3000 });
+      
+      // Strategy 2: Look for any blue button in the search results
+      if (!showingButton) {
+        console.log("🔍 Looking for blue buttons in search results...");
+        const blueButtons = await page.$$('button[style*="blue"], a[style*="blue"], .ant-btn-primary, button.blue, a.blue');
         
-        // Use XPath to find the first clickable result
-        const firstResult = await page.$x('//div[contains(@class, "ant-list-item") or contains(@class, "result") or contains(@class, "item")][1]');
-        if (firstResult.length > 0) {
-          console.log('🎯 Found result via XPath, attempting click');
-          await firstResult[0].click();
-          await waitFor(1000);
+        for (const button of blueButtons) {
+          const text = await button.evaluate(el => el.textContent.trim());
+          if (text && (text.includes('Book') || text.includes('Showing') || text.includes('Request'))) {
+            showingButton = button;
+            buttonText = text;
+            console.log(`✅ Found blue button with text: "${text}"`);
+            break;
+          }
+        }
+      }
+      
+      // Strategy 3: Look for buttons containing "Showing" in any form
+      if (!showingButton) {
+        console.log("🔍 Looking for any button containing 'Showing'...");
+        const allButtons = await page.$$('button, a');
+        
+        for (const button of allButtons) {
+          const text = await button.evaluate(el => el.textContent.trim());
+          if (text && text.toLowerCase().includes('showing')) {
+            showingButton = button;
+            buttonText = text;
+            console.log(`✅ Found button with text: "${text}"`);
+            break;
+          }
+        }
+      }
+      
+      // Strategy 4: Look for any blue button (as shown in your screenshot)
+      if (!showingButton) {
+        console.log("🔍 Looking for blue buttons (as shown in screenshot)...");
+        const blueButtons = await page.$$('button.ant-btn-primary, button[class*="primary"], button[style*="blue"], .ant-btn-primary');
+        
+        for (const button of blueButtons) {
+          const text = await button.evaluate(el => el.textContent.trim());
+          const isVisible = await button.evaluate(el => {
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
+          });
           
-          if (page.url() !== previousUrl) {
-            console.log('✅ XPath click successful');
-            success = true;
+          if (isVisible && text) {
+            console.log(`🔍 Blue button found: "${text}"`);
+            if (text.toLowerCase().includes('book') || text.toLowerCase().includes('showing') || text.toLowerCase().includes('request')) {
+              showingButton = button;
+              buttonText = text;
+              console.log(`✅ Selected blue button with text: "${text}"`);
+              break;
+            }
           }
         }
-      } catch (e) {
-        console.log('⚠️ XPath selection failed:', e.message);
       }
-    }
-
-    // Strategy 4: DOM-based selection (if all previous strategies failed)
-    if (!success) {
-      // Try to locate the global search modal or dropdown first
-      const modalOrResultsSelectors = [
-        '[role="dialog"]',
-        '.ant-modal',
-        '.ant-drawer',
-        'ul[role="listbox"]',
-        'div[role="listbox"]',
-      ];
-      for (const sel of modalOrResultsSelectors) {
-        try {
-          await page.waitForSelector(sel, { timeout: 2000 });
-          break; // Found something that likely holds results
-        } catch (_) {
-          // keep trying
-        }
-      }
-
-      // Wait specifically for first result row to render within dialog
-      const firstRowSelectors = [
-        '[role="dialog"] .ant-list-item',
-        '.ant-modal .ant-list-item',
-        '.ant-drawer .ant-list-item',
-        '[role="dialog"] li',
-        '.ant-modal li',
-        'ul[role="listbox"] li',
-        'div[role="listbox"] [role="option"]'
-      ];
-      let rowLocated = false;
-      for (const sel of firstRowSelectors) {
-        try {
-          await page.waitForSelector(sel, { timeout: 4000 });
-          rowLocated = true;
-          break;
-        } catch (_) {}
-      }
-
-      // 1) Identify the first visible row in the modal and either get its href or a safe click point
-      const target = await page.evaluate(() => {
-        const root = document.querySelector('[role="dialog"], .ant-modal, .ant-drawer') || document.body;
-        // Collect row-like elements in the modal
-        const candidates = Array.from(root.querySelectorAll(
-          '.ant-list-item, .ant-select-item, [class*="list"] [class*="item"], [class*="result"], ul[role="listbox"] li, div[role="listbox"] [role="option"]'
-        ));
-
-        function isVisible(el) {
-          const r = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
-          return r.width > 1 && r.height > 1 && style.visibility !== 'hidden' && style.display !== 'none';
-        }
-
-        let row = candidates.find(isVisible) || null;
-        if (!row) return { href: null, x: null, y: null };
-
-        // Prefer an anchor within the row
-        const a = row.querySelector('a[href]');
-        if (a && isVisible(a)) {
-          const href = a.href || a.getAttribute('href');
-          if (href) return { href, x: null, y: null };
-        }
-
-        // Compute a safe click point in the left side of the row (avoid right-side action buttons)
-        const r = row.getBoundingClientRect();
-        const x = r.left + Math.min(200, Math.max(20, r.width * 0.2));
-        const y = r.top + Math.min(r.height - 5, Math.max(10, r.height * 0.5));
-        return { href: null, x, y };
-      });
-
-      if (target && target.href) {
-        // Normalize relative URLs
-        const targetUrl = target.href.startsWith('http') ? target.href : new URL(target.href, page.url()).toString();
-        console.log(`🧭 Navigating to first result via href: ${targetUrl}`);
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-      } else {
-        // 2) No anchor? Click the first visible result container or fallback list items
-        let clicked = false;
-        if (target && target.x && target.y) {
-          try {
-            await page.mouse.click(target.x, target.y, { delay: 20 });
-            clicked = true;
-            console.log("🖱️ Clicked first result at computed position; waiting for navigation...");
-          } catch (e) {
-            console.log("⚠️ Coordinate click failed, falling back to element click:", e.message);
-          }
-        }
-
-        if (!clicked) {
-          const candidateSelectors = [
-            'ul[role="listbox"] li',
-            'div[role="listbox"] [role="option"]',
-            '.ant-select-item',
-            '.ant-list-item',
-            '[data-testid*="result" i]',
-            '[class*="search" i] li',
-          ];
-
-          let firstItemHandle = null;
-          for (const sel of candidateSelectors) {
-            try {
-              await page.waitForSelector(sel, { timeout: 3000 });
-              const handles = await page.$$(sel);
-              if (handles && handles.length > 0) {
-                firstItemHandle = handles[0];
+      
+      // Strategy 5: Look for any clickable element in the search results modal
+      if (!showingButton) {
+        console.log("🔍 Looking for any clickable element in search results...");
+        const modal = await page.$('[role="dialog"], .ant-modal, .ant-drawer');
+        if (modal) {
+          const modalButtons = await modal.$$('button, a, [role="button"]');
+          console.log(`🔍 Found ${modalButtons.length} clickable elements in modal`);
+          
+          for (const button of modalButtons) {
+            const text = await button.evaluate(el => el.textContent.trim());
+            const isVisible = await button.evaluate(el => {
+              const style = window.getComputedStyle(el);
+              return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
+            });
+            
+            if (isVisible && text) {
+              console.log(`🔍 Modal element: "${text}"`);
+              if (text.toLowerCase().includes('book') || text.toLowerCase().includes('showing') || text.toLowerCase().includes('request')) {
+                showingButton = button;
+                buttonText = text;
+                console.log(`✅ Selected modal element with text: "${text}"`);
                 break;
               }
-            } catch (_) {}
-          }
-
-          if (firstItemHandle) {
-            const box = await firstItemHandle.boundingBox();
-            if (box) {
-              await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 20 });
-            } else {
-              await firstItemHandle.click();
             }
-            console.log("🖱️ Clicked the first search result container; waiting for navigation...");
-          } else {
-            // 3) Fallback: keyboard select first item
-            console.log("⌨️ Falling back to keyboard selection (ArrowDown + Enter)");
-            await page.keyboard.press('ArrowDown');
-            await waitFor(250);
-            await page.keyboard.press('Enter');
           }
         }
       }
+      
+    } catch (error) {
+      console.log("⚠️ Error finding showing buttons:", error.message);
+    }
 
-      // Wait for URL to change or content to load
-      try {
-        await Promise.race([
-          page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }),
-          page.waitForFunction(
-            (prev) => window.location.href !== prev,
-            { timeout: 15000 },
-            previousUrl
-          ),
-        ]);
-      } catch (_) {
-        // SPA may not fire navigation; allow some time
-        await waitFor(6000);
-      }
-    } // End of Strategy 4: DOM-based selection
-
-    const propertyUrl = page.url();
-    console.log(`🔗 Landed on: ${propertyUrl}`);
-
-    // Scrape details using the dedicated scraper
-    const details = await readPropertyDetails(browser, propertyUrl);
-    if (!details) {
-      console.log("❌ Failed to scrape property details");
+    if (!showingButton) {
+      console.log("❌ No 'Book Showing' or 'Request Showing' button found");
       return null;
     }
 
-    // Persist to local SQLite
-    const saved = createProperty(details);
+    // Click the showing button
+    console.log(`🖱️ Clicking "${buttonText}" button...`);
+    const previousUrl = page.url();
+    
+    try {
+      await showingButton.click();
+      console.log(`✅ Successfully clicked "${buttonText}" button`);
+    } catch (error) {
+      console.log("⚠️ Direct click failed, trying coordinate click...");
+      const box = await showingButton.boundingBox();
+      if (box) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        console.log(`✅ Successfully clicked "${buttonText}" button via coordinates`);
+      } else {
+        throw new Error("Could not click showing button");
+      }
+    }
 
-    // Write a human-readable txt report
+    // Wait for navigation to appointment page
+    console.log("⏳ Waiting for navigation to appointment page...");
+    
+    try {
+      // Wait for URL to change to appointment format
+      await page.waitForFunction(
+        (prevUrl) => {
+          const currentUrl = window.location.href;
+          return currentUrl !== prevUrl && 
+                 currentUrl.includes('/appointments/book') && 
+                 currentUrl.includes('/listing/');
+        },
+        { timeout: 10000 },
+        previousUrl
+      );
+      
+      const newUrl = page.url();
+      console.log(`✅ Successfully navigated to appointment page: ${newUrl}`);
+      
+      // Extract property ID from URL
+      const propertyIdMatch = newUrl.match(/\/listing\/([a-f0-9]+)\/appointments/);
+      const propertyId = propertyIdMatch ? propertyIdMatch[1] : `prop_${Date.now()}`;
+      
+      // Extract property address from the page
+      const propertyAddress = await page.evaluate(() => {
+        const addressSelectors = [
+          'h1',
+          'h2',
+          '.property-address',
+          '[class*="address"]',
+          '[data-testid*="address"]'
+        ];
+        
+        for (const selector of addressSelectors) {
+          const element = document.querySelector(selector);
+          if (element && element.textContent.trim()) {
+            return element.textContent.trim();
+          }
+        }
+        return '';
+      });
+      
+      console.log(`🏠 Property Address: ${propertyAddress}`);
+      console.log(`🆔 Property ID: ${propertyId}`);
+      
+      // Scrape the showing/appointment page
+      const appointmentData = await scrapeShowingPage(page, propertyId, propertyAddress);
+      
+      if (appointmentData) {
+        // Save appointment data to database
+        const savedAppointment = createShowingAppointment(appointmentData);
+        console.log("💾 Appointment data saved to database");
+        
+        // Now proceed to scrape the main property details
+        console.log("🏠 Proceeding to scrape main property details...");
+        const propertyDetails = await readPropertyDetails(browser, newUrl);
+        
+        if (propertyDetails) {
+          // Update property details with the correct property ID and URL
+          propertyDetails.property_id = propertyId;
+          propertyDetails.url = newUrl;
+          propertyDetails.address = propertyAddress || propertyDetails.address;
+          
+          // Save property details to database
+          const savedProperty = createProperty(propertyDetails);
+          console.log("💾 Property details saved to database");
+          
+          // Write human-readable report
+          await writeReport(savedProperty, savedAppointment);
+          
+          return {
+            property: savedProperty,
+            appointment: savedAppointment
+          };
+        } else {
+          console.log("⚠️ Failed to scrape property details, but appointment data was saved");
+          return {
+            property: null,
+            appointment: savedAppointment
+          };
+        }
+      } else {
+        console.log("❌ Failed to scrape appointment page");
+        return null;
+      }
+      
+    } catch (error) {
+      console.log("❌ Navigation to appointment page failed:", error.message);
+      console.log(`Current URL: ${page.url()}`);
+      console.log("Expected URL format: https://edge.brokerbay.com/#/listing/[ID]/appointments/book");
+      return null;
+    }
+
+  } catch (error) {
+    console.log("❌ clickFirstResultAndScrape error:", error.message);
+    return null;
+  }
+}
+
+// Write a comprehensive report including both property and appointment data
+async function writeReport(property, appointment) {
+  try {
     const lines = [];
-    lines.push(`# Property Report`);
-    lines.push(`Address: ${saved.address}`);
-    lines.push(`Price: ${saved.price}`);
-    lines.push(`Bedrooms: ${saved.bedrooms}`);
-    lines.push(`Bathrooms: ${saved.bathrooms}`);
-    lines.push(`SqFt: ${saved.sqft}`);
-    lines.push(`MLS: ${saved.mls_number}`);
-    lines.push(`Status: ${saved.status}`);
-    lines.push(`Type: ${saved.property_type}`);
-    lines.push(`Agent: ${saved.agent}`);
-    lines.push(`Agent Phone: ${saved.agent_phone}`);
-    lines.push(`Year Built: ${saved.year_built ?? ''}`);
-    lines.push(`Lot Size: ${saved.lot_size ?? ''}`);
-    lines.push(`Parking Spaces: ${saved.parking_spaces}`);
-    lines.push(`URL: ${saved.url}`);
-    lines.push("");
-    if (saved.description) {
-      lines.push("Description:");
-      lines.push(saved.description);
-      lines.push("");
+    
+    // Header
+    lines.push(`# Property & Showing Report`);
+    lines.push(`Generated: ${new Date().toLocaleString()}`);
+    lines.push(``);
+    
+    // Property Information
+    if (property) {
+      lines.push(`## Property Information`);
+      lines.push(`Address: ${property.address}`);
+      lines.push(`Price: $${property.price?.toLocaleString() || 'N/A'}`);
+      lines.push(`Bedrooms: ${property.bedrooms}`);
+      lines.push(`Bathrooms: ${property.bathrooms}`);
+      lines.push(`SqFt: ${property.sqft?.toLocaleString() || 'N/A'}`);
+      lines.push(`MLS: ${property.mls_number || 'N/A'}`);
+      lines.push(`Status: ${property.status}`);
+      lines.push(`Type: ${property.property_type}`);
+      lines.push(`Agent: ${property.agent || 'N/A'}`);
+      lines.push(`Agent Phone: ${property.agent_phone || 'N/A'}`);
+      lines.push(`Year Built: ${property.year_built || 'N/A'}`);
+      lines.push(`Lot Size: ${property.lot_size || 'N/A'}`);
+      lines.push(`Parking Spaces: ${property.parking_spaces || 'N/A'}`);
+      lines.push(`URL: ${property.url}`);
+      lines.push(``);
+      
+      if (property.description) {
+        lines.push(`### Description`);
+        lines.push(property.description);
+        lines.push(``);
+      }
     }
-    if (saved.features) {
-      lines.push("Features/Details JSON:");
-      lines.push(typeof saved.features === 'string' ? saved.features : JSON.stringify(saved.features, null, 2));
-      lines.push("");
+    
+    // Appointment Information
+    if (appointment) {
+      lines.push(`## Showing Appointment Information`);
+      lines.push(`Appointment ID: ${appointment.appointment_id}`);
+      lines.push(`Property Address: ${appointment.property_address}`);
+      lines.push(`Agent Name: ${appointment.agent_name || 'N/A'}`);
+      lines.push(`Agent Company: ${appointment.agent_company || 'N/A'}`);
+      lines.push(`Agent Address: ${appointment.agent_address || 'N/A'}`);
+      lines.push(`Agent Email: ${appointment.agent_email || 'N/A'}`);
+      lines.push(`Showing Type: ${appointment.showing_type}`);
+      lines.push(`Selected Date: ${appointment.selected_date || 'N/A'}`);
+      lines.push(`Selected Time: ${appointment.selected_time || 'N/A'}`);
+      lines.push(`Timezone: ${appointment.timezone}`);
+      lines.push(`Status: ${appointment.status}`);
+      lines.push(`Notes: ${appointment.notes || 'None'}`);
+      lines.push(`Buyers Invited: ${appointment.buyers_invited || 'None'}`);
+      lines.push(`Appointment URL: ${appointment.appointment_url}`);
+      lines.push(``);
     }
-
+    
+    // Database Information
+    lines.push(`## Database Information`);
+    lines.push(`Property ID: ${property?.property_id || 'N/A'}`);
+    lines.push(`Appointment ID: ${appointment?.appointment_id || 'N/A'}`);
+    lines.push(`Created: ${new Date().toLocaleString()}`);
+    lines.push(`Database: src/data/data.db`);
+    
+    // Write to file
     const outDir = path.resolve("src/data");
     const outPath = path.join(outDir, "last-scrape.txt");
     await fs.mkdir(outDir, { recursive: true });
     await fs.writeFile(outPath, lines.join("\n"), "utf-8");
-    console.log(`📝 Wrote human-readable report: ${outPath}`);
-
-    return saved;
+    console.log(`📝 Comprehensive report written to: ${outPath}`);
+    
   } catch (error) {
-    console.log("❌ clickFirstResultAndScrape error:", error.message);
-    return null;
+    console.log("❌ Error writing report:", error.message);
   }
 }
 

@@ -4,7 +4,7 @@ import { configDotenv } from "dotenv";
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { loginToBrokerBay, waitFor, performDashboardSearch } from "./src/utils.js";
-import { clickFirstResultAndScrape } from "./src/property-scraper/ClickAndScrape.js";
+import { manualApiSearchAndScrape } from "./src/property-scraper/ManualApiSearch.js";
 
 puppeteer.use(StealthPlugin());
 configDotenv();
@@ -46,10 +46,21 @@ async function testLogin() {
         console.log("⚠️ Dashboard search did not complete successfully");
       }
 
-      // Click the first result, scrape, save, and write txt report
-      const saved = await clickFirstResultAndScrape(page, browser, searchQuery);
-      if (saved) {
-        console.log("✅ Scrape complete and saved:", saved.property_id);
+    // Use manual API search approach to bypass modal issues
+    console.log("🎯 Using manual API search approach...");
+    const result = await manualApiSearchAndScrape(page, browser, searchQuery);
+      
+      if (result) {
+        if (result.property) {
+          console.log("✅ Property data scraped and saved:", result.property.property_id);
+        }
+        if (result.appointment) {
+          console.log("✅ Appointment data scraped and saved:", result.appointment.appointment_id);
+        }
+        console.log("📊 Both property and appointment data have been saved to the database");
+      } else {
+        console.log("❌ Failed to get search results from API");
+        console.log("💡 The search API may not be returning results for this query");
       }
       
       // Take a screenshot

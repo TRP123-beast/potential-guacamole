@@ -7,10 +7,9 @@ import path from "path";
 
 configDotenv();
 
-// Demo data for 101 Lake Drive N
 const DEMO_PROPERTY_DATA = {
   property_id: "bb_demo_101_lake_drive_n",
-  address: "101 Lake Drive N, Georgina, ON L4P 1A1",
+  address: "1019 Lakeshore Drive N, Bracebridge, ON, P1L 1X3",
   price: 899000,
   price_change: 0,
   status: "Active",
@@ -423,7 +422,7 @@ async function runDemo() {
   
   printHeader("🏠 BROKER BAY PROPERTY SCRAPING DEMO", 'bgBlue');
   console.log(`${colors.bright}${colors.white}Running the scraping tool${colors.reset}`);
-  console.log(`${colors.dim}Property: 101 Lake Drive N, Georgina, ON${colors.reset}`);
+  console.log(`${colors.dim}1019 Lakeshore Drive N, Bracebridge, ON, P1L 1X3${colors.reset}`);
   
   // Step 1: Login Simulation
   printStep(1, "Simulating Broker Bay Login", 'info');
@@ -435,7 +434,7 @@ async function runDemo() {
   
   // Step 2: Search Simulation
   printStep(2, "Performing property search", 'info');
-  console.log(`${colors.dim}  Searching for: "101 Lake Drive N"${colors.reset}`);
+  console.log(`${colors.dim}  Searching for: "1019 Lakeshore Drive N"${colors.reset}`);
   await new Promise(resolve => setTimeout(resolve, 3000));
   console.log(`${colors.dim}  Processing search results...${colors.reset}`);
   await new Promise(resolve => setTimeout(resolve, 1500));
@@ -477,7 +476,7 @@ async function runDemo() {
       await new Promise(resolve => setTimeout(resolve, 800));
       console.log(`${colors.dim}    Parsing calendar data...${colors.reset}`);
       await new Promise(resolve => setTimeout(resolve, 600));
-      console.log(`${colors.dim}    Analyzing available time signals (before 9 AM, after 3 PM)...${colors.reset}`);
+      console.log(`${colors.dim}    Analyzing available time signals ${colors.reset}`);
       await new Promise(resolve => setTimeout(resolve, 600));
       console.log(`${colors.dim}    Generating 5 non-overlapping time slots per day...${colors.reset}`);
     }

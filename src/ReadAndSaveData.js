@@ -28,6 +28,8 @@ function setupDatabase() {
     year_built INTEGER,
     lot_size TEXT,
     parking_spaces INTEGER,
+    organization TEXT,
+    organization_address TEXT,
     UNIQUE(property_id)
   );
   
@@ -49,6 +51,42 @@ function setupDatabase() {
     content TEXT,
     timestamp TEXT,
     UNIQUE(property_id, notification_type, timestamp)
+  );
+
+  CREATE TABLE IF NOT EXISTS showing_appointments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id TEXT,
+    appointment_id TEXT UNIQUE,
+    property_address TEXT,
+    agent_name TEXT,
+    agent_company TEXT,
+    agent_address TEXT,
+    agent_email TEXT,
+    showing_type TEXT,
+    selected_date TEXT,
+    selected_time TEXT,
+    timezone TEXT,
+    status TEXT,
+    notes TEXT,
+    buyers_invited TEXT,
+    appointment_url TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    FOREIGN KEY(property_id) REFERENCES properties(property_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS showing_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id TEXT,
+    date TEXT,
+    time TEXT,
+    duration TEXT,
+    status TEXT,
+    organization TEXT,
+    organization_address TEXT,
+    timezone TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (property_id) REFERENCES properties (property_id)
   );  
  `);
 
@@ -60,8 +98,8 @@ export function createProperty(propertyData) {
   const db = setupDatabase();
   try {
     const insertStmt = db.prepare(`
-    INSERT INTO properties (property_id, address, price, price_change, status, bedrooms, bathrooms, sqft, listing_date, last_updated, mls_number, agent, agent_phone, description, features, details_json, rooms_json, url, property_type, year_built, lot_size, parking_spaces)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    INSERT INTO properties (property_id, address, price, price_change, status, bedrooms, bathrooms, sqft, listing_date, last_updated, mls_number, agent, agent_phone, description, features, details_json, rooms_json, url, property_type, year_built, lot_size, parking_spaces, organization, organization_address)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
 
     try {
@@ -87,7 +125,9 @@ export function createProperty(propertyData) {
         propertyData.property_type,
         propertyData.year_built,
         propertyData.lot_size,
-        propertyData.parking_spaces
+        propertyData.parking_spaces,
+        propertyData.organization,
+        propertyData.organization_address
       );
       sendPropertyToAnalysis(propertyData);
       console.log(`Property ${propertyData.property_id} saved successfully`);
@@ -295,6 +335,139 @@ export function updateProperty(propertyData) {
     console.log(`Property ${propertyData.property_id} updated successfully`);
   } catch (error) {
     console.log("An error occurred updating property: " + error);
+  } finally {
+    db.close();
+  }
+}
+
+// Showing Appointment Functions
+export function createShowingAppointment(appointmentData) {
+  const db = setupDatabase();
+  try {
+    const insertStmt = db.prepare(`
+    INSERT OR REPLACE INTO showing_appointments (
+      property_id, appointment_id, property_address, agent_name, agent_company,
+      agent_address, agent_email, showing_type, selected_date, selected_time,
+      timezone, status, notes, buyers_invited, appointment_url, created_at, updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `);
+
+    try {
+      insertStmt.run(
+        appointmentData.property_id,
+        appointmentData.appointment_id,
+        appointmentData.property_address,
+        appointmentData.agent_name,
+        appointmentData.agent_company,
+        appointmentData.agent_address,
+        appointmentData.agent_email,
+        appointmentData.showing_type,
+        appointmentData.selected_date,
+        appointmentData.selected_time,
+        appointmentData.timezone,
+        appointmentData.status,
+        appointmentData.notes,
+        appointmentData.buyers_invited,
+        appointmentData.appointment_url,
+        appointmentData.created_at,
+        appointmentData.updated_at
+      );
+      console.log(`Showing appointment ${appointmentData.appointment_id} saved successfully`);
+    } catch (error) {
+      console.log("Duplicate protection: " + error.code);
+    }
+  } catch (error) {
+    console.warn("An error occurred at insertShowingAppointment: " + error);
+  } finally {
+    db.close();
+    return appointmentData;
+  }
+}
+
+export function getShowingAppointments(property_id) {
+  const db = setupDatabase();
+  try {
+    const query = "SELECT * FROM showing_appointments WHERE property_id = ? ORDER BY created_at DESC";
+    const result = db.prepare(query).all(property_id);
+    return result;
+  } catch (error) {
+    console.warn("An error occurred: " + error);
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+export function getAllShowingAppointments() {
+  const db = setupDatabase();
+  try {
+    const query = "SELECT * FROM showing_appointments ORDER BY created_at DESC";
+    const result = db.prepare(query).all();
+    return result;
+  } catch (error) {
+    console.warn("An error occurred: " + error);
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+// Showing Schedule Functions
+export function createShowingSchedule(scheduleData) {
+  const db = setupDatabase();
+  try {
+    const insertStmt = db.prepare(`
+      INSERT INTO showing_schedules (
+        property_id, date, time, duration, status, organization, organization_address, timezone
+      ) VALUES (?,?,?,?,?,?,?,?)
+    `);
+
+    try {
+      insertStmt.run(
+        scheduleData.property_id,
+        scheduleData.date,
+        scheduleData.time,
+        scheduleData.duration,
+        scheduleData.status,
+        scheduleData.organization,
+        scheduleData.organization_address,
+        scheduleData.timezone
+      );
+      console.log(`Showing schedule saved for property ${scheduleData.property_id}`);
+    } catch (error) {
+      console.log("Error saving showing schedule: " + error);
+    }
+  } catch (error) {
+    console.warn("An error occurred at insertShowingSchedule: " + error);
+  } finally {
+    db.close();
+    return scheduleData;
+  }
+}
+
+export function getShowingSchedules(property_id) {
+  const db = setupDatabase();
+  try {
+    const query = "SELECT * FROM showing_schedules WHERE property_id = ? ORDER BY date, time";
+    const result = db.prepare(query).all(property_id);
+    return result;
+  } catch (error) {
+    console.warn("An error occurred: " + error);
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+export function getAllShowingSchedules() {
+  const db = setupDatabase();
+  try {
+    const query = "SELECT * FROM showing_schedules ORDER BY date, time";
+    const result = db.prepare(query).all();
+    return result;
+  } catch (error) {
+    console.warn("An error occurred: " + error);
+    return null;
   } finally {
     db.close();
   }

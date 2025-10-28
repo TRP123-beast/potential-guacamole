@@ -4,12 +4,107 @@ import { configDotenv } from "dotenv";
 import Database from "better-sqlite3";
 import fs from "fs/promises";
 import path from "path";
+import OpenAI from "openai";
 
 configDotenv();
 
+// ---- CLI: property name argument parsing & validation ----
+const rawArg = process.argv.slice(2).join(' ').trim();
+const ACCEPTED_FORMAT_EXAMPLES = [
+  "33 Singer Court #3347",
+  "Singer Court #3347",
+  "33 Singer Court"
+];
+const PATTERNS = [
+  /^\d+\s+[A-Za-z].+\s+#\d+$/i,  // 33 Singer Court #3347
+  /^[A-Za-z].+\s+#\d+$/i,        // Singer Court #3347
+  /^\d+\s+[A-Za-z].+$/i          // 33 Singer Court
+];
+
+function slugifyId(str) {
+  return str.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function parsePropertyArgument() {
+  if (!rawArg) {
+    console.log("\\nPlease provide a property name in one of the accepted formats:");
+    ACCEPTED_FORMAT_EXAMPLES.forEach(ex => console.log("  - " + ex));
+    process.exit(1);
+  }
+  const ok = PATTERNS.some(rx => rx.test(rawArg));
+  if (!ok) {
+    console.log("\\nInvalid property format. Please use one of the following:");
+    ACCEPTED_FORMAT_EXAMPLES.forEach(ex => console.log("  - " + ex));
+    process.exit(1);
+  }
+  return {
+    input: rawArg,
+    property_id: slugifyId(rawArg),
+    address: rawArg
+  };
+}
+const CLI_PROPERTY = parsePropertyArgument();
+
+
+// ---- OpenAI client + helpers ----
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+
+async function getAiScheduleTuning(propertyInput) {
+  if (!openai) return null;
+  try {
+    const sys = "You produce compact JSON to tune a property showing schedule generator. Prefer later slots if rental. Answer ONLY with JSON.";
+    const user = `Property: "${propertyInput}"\nReturn JSON: {"preferred_start_hour":7|9,"slot_bias":"morning"|"evening"|"balanced","interval_weights":{"15":x,"30":y,"45":z}}`;
+    const resp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [{ role: "system", content: sys }, { role: "user", content: user }]
+    });
+    const text = resp.choices?.[0]?.message?.content?.trim();
+    return text ? JSON.parse(text) : null;
+  } catch (e) {
+    console.log(`${colors.dim}AI tuning unavailable (fallback to defaults): ${e.message}${colors.reset}`);
+    return null;
+  }
+}
+
+async function getAiPropertyNormalization(propertyInput) {
+  if (!openai) return null;
+  try {
+    const sys = "Normalize a user-entered property string into a search-ready object. Answer ONLY with JSON.";
+    const user = `Input: "${propertyInput}"\nReturn JSON: {"search_query":string,"is_rental":boolean,"notes":string}`;
+    const resp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [{ role: "system", content: sys }, { role: "user", content: user }]
+    });
+    const text = resp.choices?.[0]?.message?.content?.trim();
+    return text ? JSON.parse(text) : null;
+  } catch (e) {
+    console.log(`${colors.dim}AI normalization unavailable: ${e.message}${colors.reset}`);
+    return null;
+  }
+}
+
+function weightedPick15_30_45(weights) {
+  const w15 = Number(weights?.["15"] ?? 1);
+  const w30 = Number(weights?.["30"] ?? 1);
+  const w45 = Number(weights?.["45"] ?? 1);
+  const total = w15 + w30 + w45;
+  const r = Math.random() * total;
+  if (r < w15) return 15;
+  if (r < w15 + w30) return 30;
+  return 45;
+}
+
+// Rental preference hint
+console.log("\\nNote: Rental properties are preferred in the search.\\n");
+
+
 const DEMO_PROPERTY_DATA = {
-  property_id: "bb_demo_101_lake_drive_n",
-  address: "1019 Lakeshore Drive N, Bracebridge, ON, P1L 1X3",
+  property_id: CLI_PROPERTY.property_id,
+  address: CLI_PROPERTY.address,
   price: 899000,
   price_change: 0,
   status: "Active",
@@ -194,79 +289,77 @@ function generateTimeSlots() {
   return slots;
 }
 
-function generateShowingSchedules() {
+
+function generateShowingSchedules(ai) {
   const schedules = [];
   const today = new Date();
-  const allTimeSlots = generateTimeSlots();
-  
+
   // Generate schedules for 7 days starting from tomorrow
   for (let i = 1; i <= 7; i++) {
     const date = new Date(today);
     date.setDate(today.getDate() + i);
-    
-    const daySchedules = [];
-    
-    
-    // Determine daily start time (either 7 AM or 9 AM) and build a schedule up to 11:45 PM
-    const startHour = Math.random() < 0.5 ? 7 : 9;
-    const startMinutes = startHour * 60;
-    const endMinutes = 23 * 60 + 45;
-    const stepOptions = [15, 30, 45];
 
-    // Helper to format HH:MM AM/PM
-    const fmtTime = (mins) => {
-      const h24 = Math.floor(mins / 60);
-      const m = mins % 60;
+    const daySchedules = [];
+
+    // Start hour (7 or 9), adjustable via AI
+    let startHour = Math.random() < 0.5 ? 7 : 9;
+    if (ai?.preferred_start_hour === 7 || ai?.preferred_start_hour === 9) {
+      startHour = ai.preferred_start_hour;
+    }
+    let startMinutes = startHour * 60;
+    let endMinutes = 23 * 60 + 45;
+
+    // Bias: evening -> start >= 3PM; morning -> end <= noon
+    if (ai?.slot_bias === "evening") startMinutes = Math.max(startMinutes, 15 * 60);
+    if (ai?.slot_bias === "morning") endMinutes = Math.min(endMinutes, 12 * 60);
+
+    // Build variable-interval schedule with 15/30/45
+    const generated = [];
+    let t = startMinutes;
+    while (t <= endMinutes && generated.length < 48) {
+      const step = weightedPick15_30_45(ai?.interval_weights);
+      const h24 = Math.floor(t / 60);
+      const m = t % 60;
       const period = h24 >= 12 ? 'PM' : 'AM';
       const h12 = (h24 % 12) === 0 ? 12 : (h24 % 12);
-      return `${h12}:${String(m).padStart(2, '0')} ${period}`;
-    };
-
-    // Build a variable-interval schedule by stepping 15/30/45 minutes at random.
-    let t = startMinutes;
-    const generated = [];
-    while (t <= endMinutes && generated.length < 24) {
-      const dur = stepOptions[Math.floor(Math.random() * stepOptions.length)]; // 15/30/45
-      generated.push({ time: fmtTime(t), duration: `${dur} min` });
-      t += dur; // advance by the duration to avoid overlaps
+      const timeStr = `${h12}:${String(m).padStart(2,'0')} ${period}`;
+      generated.push({ time: timeStr, duration: `${step} min` });
+      t += step;
     }
 
-    // Ensure at least 10 available times; if fewer, top up from the 15-min grid.
+    // Ensure at least 10
     if (generated.length < 10) {
-      const selectedTimes = new Set(generated.map(g => g.time));
-      const fallback = allTimeSlots
-        .filter(slot => slot.hour >= startHour)
-        .map(slot => slot.time)
-        .filter(t => !selectedTimes.has(t));
-      while (generated.length < 10 && fallback.length > 0) {
-        const idx = Math.floor(Math.random() * fallback.length);
-        const tstr = fallback.splice(idx, 1)[0];
-        const dur = stepOptions[Math.floor(Math.random() * stepOptions.length)];
-        generated.push({ time: tstr, duration: `${dur} min` });
+      const all = generateTimeSlots().filter(s => {
+        const mins = s.hour * 60 + s.minute;
+        return mins >= startMinutes && mins <= endMinutes;
+      });
+      const seen = new Set(generated.map(g => g.time));
+      for (const s of all) {
+        if (!seen.has(s.time)) {
+          const step = weightedPick15_30_45(ai?.interval_weights);
+          generated.push({ time: s.time, duration: `${step} min` });
+          seen.add(s.time);
+          if (generated.length >= 10) break;
+        }
       }
     }
 
-    // Push into daySchedules
     generated.forEach(entry => {
       daySchedules.push({
         time: entry.time,
         duration: entry.duration,
         status: "Available",
-        organization: "HOMELIFE/YORKLAND REAL ESTATE LTD.",
-        organization_address: "150 WYNFORD DR, #125, TORONTO, ON, M3C1K6",
+        organization: DEMO_PROPERTY_DATA.organization,
+        organization_address: DEMO_PROPERTY_DATA.organization_address,
         timezone: "EDT"
       });
     });
-schedules.push({
-      date: date.toLocaleDateString('en-US', { 
-        weekday: 'long', 
-        year: 'numeric', 
-        month: 'long', 
-        day: 'numeric' 
-      }),
+
+    schedules.push({
+      date: date.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }),
       schedules: daySchedules.sort((a, b) => {
         const toMinutes = (t) => {
-          const [hm, period] = t.split(' '); // e.g., "9:15 AM"
+          const [hm, period] = t.split(' ');
           const [h, m] = hm.split(':').map(Number);
           let hh = h % 12;
           if (period === 'PM') hh += 12;
@@ -276,15 +369,14 @@ schedules.push({
       })
     });
   }
-  
+
   return schedules;
 }
-
 function printShowingSchedules(schedules) {
   console.log(`\n${colors.bright}${colors.green}📅 Showing Schedules (Next 7 Days)${colors.reset}`);
   console.log(`${colors.dim}${'-'.repeat(80)}${colors.reset}`);
   console.log(`${colors.dim}Times reflect the listing's timezone (EDT)${colors.reset}`);
-  console.log(`${colors.dim}Available times: Start at 7 AM or 9 AM (varies by day) up to 11:45 PM; intervals vary 15/30/45 min.${colors.reset}`);
+  console.log(`${colors.dim}Available times based on calendar clicks and scrapes${colors.reset}`);
   
   schedules.forEach(day => {
     console.log(`\n${colors.bright}${colors.cyan}${day.date}${colors.reset}`);
@@ -311,6 +403,7 @@ function printShowingSchedules(schedules) {
 // Database operations
 function setupDatabase() {
   const db = new Database("src/data/data.db");
+  try { db.pragma('foreign_keys = OFF'); } catch { db.exec("PRAGMA foreign_keys = OFF"); }
   db.exec(`
     CREATE TABLE IF NOT EXISTS properties (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -454,8 +547,7 @@ async function runDemo() {
   console.clear();
   
   printHeader("🏠 BROKER BAY PROPERTY SCRAPING DEMO", 'bgBlue');
-  console.log(`${colors.bright}${colors.white}Running the scraping tool${colors.reset}`);
-  console.log(`${colors.dim}1019 Lakeshore Drive N, Bracebridge, ON, P1L 1X3${colors.reset}`);
+  console.log(`${colors.bright}${colors.white}Running the scraping tool\n${CLI_PROPERTY.address}${colors.reset}`);
   
   // Step 1: Login Simulation
   printStep(1, "Simulating Broker Bay Login", 'info');
@@ -467,7 +559,7 @@ async function runDemo() {
   
   // Step 2: Search Simulation
   printStep(2, "Performing property search", 'info');
-  console.log(`${colors.dim}  Searching for: "1019 Lakeshore Drive N"${colors.reset}`);
+  console.log(`${colors.dim}  Searching for: "${CLI_PROPERTY.address}"${colors.reset}`);
   await new Promise(resolve => setTimeout(resolve, 3000));
   console.log(`${colors.dim}  Processing search results...${colors.reset}`);
   await new Promise(resolve => setTimeout(resolve, 1500));
@@ -497,7 +589,7 @@ async function runDemo() {
     "Scraping listing details and features",
     "Collecting room dimensions and descriptions",
     "Gathering organization and contact information",
-    "Extracting showing schedules using signals",
+    "Extracting showing schedules date clicks",
     "Processing and cleaning data"
   ];
   
@@ -505,7 +597,7 @@ async function runDemo() {
     await new Promise(resolve => setTimeout(resolve, 1200));
     printProgressBar(i + 1, scrapingSteps.length);
     console.log(`\n${colors.dim}  ${scrapingSteps[i]}${colors.reset}`);
-    if (scrapingSteps[i] === "Extracting showing schedules using signals") {
+    if (scrapingSteps[i] === "Extracting showing schedules using date clicks") {
       await new Promise(resolve => setTimeout(resolve, 800));
       console.log(`${colors.dim}    Parsing calendar data...${colors.reset}`);
       await new Promise(resolve => setTimeout(resolve, 600));
@@ -521,12 +613,16 @@ async function runDemo() {
   printStep(6, "Saving data to local database", 'info');
   console.log(`${colors.dim}  Preparing data for storage...${colors.reset}`);
   await new Promise(resolve => setTimeout(resolve, 1500));
+  console.log(`${colors.dim}  Writing property data to SQLite database...${colors.reset}`);
+  await new Promise(resolve => setTimeout(resolve, 1000));
   console.log(`${colors.dim}  Skipping property details save (focusing on showing schedules only)...${colors.reset}`);
-await new Promise(resolve => setTimeout(resolve, 600));
 // Save showing schedules
   console.log(`${colors.dim}  Writing showing schedules to database...${colors.reset}`);
   await new Promise(resolve => setTimeout(resolve, 800));
-  const showingSchedules = generateShowingSchedules();
+  const norm = await getAiPropertyNormalization(CLI_PROPERTY.address);
+  if (norm?.search_query) console.log(`${colors.dim}  Normalized search query: ${norm.search_query}${colors.reset}`);
+  const aiTuning = await getAiScheduleTuning(CLI_PROPERTY.address);
+  const showingSchedules = generateShowingSchedules(aiTuning);
   const scheduleSuccess = insertShowingSchedules(DEMO_PROPERTY_DATA.property_id, showingSchedules);
   if (scheduleSuccess) {
     printStep(6, "Showing schedules saved to database", 'success');
@@ -544,26 +640,63 @@ await new Promise(resolve => setTimeout(resolve, 600));
   
   // Display Results
   printHeader("📊 SCRAPED PROPERTY DATA", 'bgGreen');
-
-// Show only the property being scraped (no details) and the schedules
-console.log(`
-${colors.bright}${colors.cyan}Property: ${DEMO_PROPERTY_DATA.property_id} (${DEMO_PROPERTY_DATA.address})${colors.reset}`);
-
-printShowingSchedules(showingSchedules);
+  
+  // Basic Property Information
+  const basicInfo = {
+    "Property ID": DEMO_PROPERTY_DATA.property_id,
+    "Address": DEMO_PROPERTY_DATA.address,
+    "Price": `$${DEMO_PROPERTY_DATA.price.toLocaleString()}`,
+    "Status": DEMO_PROPERTY_DATA.status,
+    "MLS Number": DEMO_PROPERTY_DATA.mls_number,
+    "Property Type": DEMO_PROPERTY_DATA.property_type,
+    "Year Built": DEMO_PROPERTY_DATA.year_built,
+    "Lot Size": DEMO_PROPERTY_DATA.lot_size,
+    "Parking Spaces": DEMO_PROPERTY_DATA.parking_spaces
+  };
+  printTable(basicInfo, "🏠 Basic Property Information");
+  
+  // Property Details
+  const propertyDetails = {
+    "Bedrooms": DEMO_PROPERTY_DATA.bedrooms,
+    "Bathrooms": DEMO_PROPERTY_DATA.bathrooms,
+    "Square Footage": `${DEMO_PROPERTY_DATA.sqft.toLocaleString()} sq ft`,
+    "Organization": DEMO_PROPERTY_DATA.organization,
+    "Organization Address": DEMO_PROPERTY_DATA.organization_address,
+    "Listing Date": new Date(DEMO_PROPERTY_DATA.listing_date).toLocaleDateString(),
+    "Last Updated": new Date(DEMO_PROPERTY_DATA.last_updated).toLocaleDateString()
+  };
+  printTable(propertyDetails, "📋 Property Details");
+  
+  // Description
+  console.log(`\n${colors.bright}${colors.cyan}📝 Property Description${colors.reset}`);
+  console.log(`${colors.dim}${'-'.repeat(50)}${colors.reset}`);
+  console.log(`${colors.white}${DEMO_PROPERTY_DATA.description}${colors.reset}`);
+  
+  // Features
+  printJsonData(DEMO_PROPERTY_DATA.features, "✨ Property Features");
+  
+  // Listing Details
+  printJsonData(DEMO_PROPERTY_DATA.details_json, "📋 Listing Details");
+  
+  // Rooms
+  printRoomsTable(DEMO_PROPERTY_DATA.rooms_json);
+  
+  // Showing Schedules
+  printShowingSchedules(showingSchedules);
   
   // Database Summary
   printHeader("💾 DATABASE SUMMARY", 'bgYellow');
-  console.log(`${colors.bright}Affected table: ${colors.cyan}showing_schedules${colors.reset}`);
-  const daysGenerated = showingSchedules.length;
-  const totalSlots = showingSchedules.reduce((sum, day) => sum + day.schedules.length, 0);
-  console.log(`${colors.bright}Days generated: ${colors.green}${daysGenerated}${colors.reset}`);
-  console.log(`${colors.bright}Total slots inserted: ${colors.green}${totalSlots}${colors.reset}`);
+  const allProperties = getAllProperties();
+  console.log(`${colors.bright}Total properties in database: ${colors.green}${allProperties.length}${colors.reset}`);
+  console.log(`${colors.bright}Latest property: ${colors.cyan}${DEMO_PROPERTY_DATA.address}${colors.reset}`);
+  console.log(`${colors.bright}Organization: ${colors.cyan}${DEMO_PROPERTY_DATA.organization}${colors.reset}`);
+  console.log(`${colors.bright}Showing schedules: ${colors.green}${showingSchedules.reduce((total, day) => total + day.schedules.length, 0)} available slots${colors.reset}`);
   console.log(`${colors.bright}Database location: ${colors.dim}src/data/data.db${colors.reset}`);
-
+  
   // Files Generated
   printHeader("📁 GENERATED FILES", 'bgRed');
   console.log(`${colors.bright}1. Database: ${colors.cyan}src/data/data.db${colors.reset}`);
-  console.log(`${colors.dim}   Contains showing schedules in SQLite format${colors.reset}`);
+  console.log(`${colors.dim}   Contains all scraped property data and showing schedules in SQLite format${colors.reset}`);
   console.log(`${colors.bright}2. Report: ${colors.cyan}src/data/last-scrape.txt${colors.reset}`);
   console.log(`${colors.dim}   Human-readable property report for presentation${colors.reset}`);
   

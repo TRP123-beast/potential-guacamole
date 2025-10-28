@@ -199,33 +199,65 @@ function generateShowingSchedules() {
   const today = new Date();
   const allTimeSlots = generateTimeSlots();
   
-  // Generate schedules for 5 days starting from tomorrow
-  for (let i = 1; i <= 5; i++) {
+  // Generate schedules for 7 days starting from tomorrow
+  for (let i = 1; i <= 7; i++) {
     const date = new Date(today);
     date.setDate(today.getDate() + i);
     
     const daySchedules = [];
     
-    // Filter available time slots (before 9 AM and after 3 PM)
-    const availableSlots = allTimeSlots.filter(slot => slot.isAvailable);
     
-    // Select exactly 5 available time slots without overlapping
-    const numSlots = Math.min(5, availableSlots.length);
-    const selectedSlots = availableSlots.sort(() => 0.5 - Math.random()).slice(0, numSlots);
-    
-    selectedSlots.forEach(slot => {
-      const duration = "30 min"; // Standard showing duration
+    // Determine daily start time (either 7 AM or 9 AM) and build a schedule up to 11:45 PM
+    const startHour = Math.random() < 0.5 ? 7 : 9;
+    const startMinutes = startHour * 60;
+    const endMinutes = 23 * 60 + 45;
+    const stepOptions = [15, 30, 45];
+
+    // Helper to format HH:MM AM/PM
+    const fmtTime = (mins) => {
+      const h24 = Math.floor(mins / 60);
+      const m = mins % 60;
+      const period = h24 >= 12 ? 'PM' : 'AM';
+      const h12 = (h24 % 12) === 0 ? 12 : (h24 % 12);
+      return `${h12}:${String(m).padStart(2, '0')} ${period}`;
+    };
+
+    // Build a variable-interval schedule by stepping 15/30/45 minutes at random.
+    let t = startMinutes;
+    const generated = [];
+    while (t <= endMinutes && generated.length < 24) {
+      const dur = stepOptions[Math.floor(Math.random() * stepOptions.length)]; // 15/30/45
+      generated.push({ time: fmtTime(t), duration: `${dur} min` });
+      t += dur; // advance by the duration to avoid overlaps
+    }
+
+    // Ensure at least 10 available times; if fewer, top up from the 15-min grid.
+    if (generated.length < 10) {
+      const selectedTimes = new Set(generated.map(g => g.time));
+      const fallback = allTimeSlots
+        .filter(slot => slot.hour >= startHour)
+        .map(slot => slot.time)
+        .filter(t => !selectedTimes.has(t));
+      while (generated.length < 10 && fallback.length > 0) {
+        const idx = Math.floor(Math.random() * fallback.length);
+        const tstr = fallback.splice(idx, 1)[0];
+        const dur = stepOptions[Math.floor(Math.random() * stepOptions.length)];
+        generated.push({ time: tstr, duration: `${dur} min` });
+      }
+    }
+
+    // Push into daySchedules
+    generated.forEach(entry => {
       daySchedules.push({
-        time: slot.time,
-        duration,
+        time: entry.time,
+        duration: entry.duration,
         status: "Available",
         organization: "HOMELIFE/YORKLAND REAL ESTATE LTD.",
         organization_address: "150 WYNFORD DR, #125, TORONTO, ON, M3C1K6",
         timezone: "EDT"
       });
     });
-    
-    schedules.push({
+schedules.push({
       date: date.toLocaleDateString('en-US', { 
         weekday: 'long', 
         year: 'numeric', 
@@ -233,13 +265,14 @@ function generateShowingSchedules() {
         day: 'numeric' 
       }),
       schedules: daySchedules.sort((a, b) => {
-        const timeA = a.time.includes('PM') ? 
-          parseInt(a.time.split(':')[0]) + (a.time.includes('12') ? 0 : 12) : 
-          parseInt(a.time.split(':')[0]);
-        const timeB = b.time.includes('PM') ? 
-          parseInt(b.time.split(':')[0]) + (b.time.includes('12') ? 0 : 12) : 
-          parseInt(b.time.split(':')[0]);
-        return timeA - timeB;
+        const toMinutes = (t) => {
+          const [hm, period] = t.split(' '); // e.g., "9:15 AM"
+          const [h, m] = hm.split(':').map(Number);
+          let hh = h % 12;
+          if (period === 'PM') hh += 12;
+          return hh * 60 + m;
+        };
+        return toMinutes(a.time) - toMinutes(b.time);
       })
     });
   }
@@ -248,10 +281,10 @@ function generateShowingSchedules() {
 }
 
 function printShowingSchedules(schedules) {
-  console.log(`\n${colors.bright}${colors.green}📅 Showing Schedules (Next 5 Days)${colors.reset}`);
+  console.log(`\n${colors.bright}${colors.green}📅 Showing Schedules (Next 7 Days)${colors.reset}`);
   console.log(`${colors.dim}${'-'.repeat(80)}${colors.reset}`);
   console.log(`${colors.dim}Times reflect the listing's timezone (EDT)${colors.reset}`);
-  console.log(`${colors.dim}Available times: Before 9 AM and after 3 PM (based on signals)${colors.reset}`);
+  console.log(`${colors.dim}Available times: Start at 7 AM or 9 AM (varies by day) up to 11:45 PM; intervals vary 15/30/45 min.${colors.reset}`);
   
   schedules.forEach(day => {
     console.log(`\n${colors.bright}${colors.cyan}${day.date}${colors.reset}`);
@@ -478,7 +511,7 @@ async function runDemo() {
       await new Promise(resolve => setTimeout(resolve, 600));
       console.log(`${colors.dim}    Analyzing available time signals ${colors.reset}`);
       await new Promise(resolve => setTimeout(resolve, 600));
-      console.log(`${colors.dim}    Generating 5 non-overlapping time slots per day...${colors.reset}`);
+      console.log(`${colors.dim}    Generating at least 10 time slots per day with 15/30/45-minute intervals...${colors.reset}`);
     }
   }
   
@@ -488,16 +521,9 @@ async function runDemo() {
   printStep(6, "Saving data to local database", 'info');
   console.log(`${colors.dim}  Preparing data for storage...${colors.reset}`);
   await new Promise(resolve => setTimeout(resolve, 1500));
-  console.log(`${colors.dim}  Writing property data to SQLite database...${colors.reset}`);
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  const dbSuccess = insertDemoProperty(DEMO_PROPERTY_DATA);
-  if (dbSuccess) {
-    printStep(6, "Property data saved to SQLite database", 'success');
-  } else {
-    printStep(6, "Property database save failed", 'error');
-  }
-  
-  // Save showing schedules
+  console.log(`${colors.dim}  Skipping property details save (focusing on showing schedules only)...${colors.reset}`);
+await new Promise(resolve => setTimeout(resolve, 600));
+// Save showing schedules
   console.log(`${colors.dim}  Writing showing schedules to database...${colors.reset}`);
   await new Promise(resolve => setTimeout(resolve, 800));
   const showingSchedules = generateShowingSchedules();
@@ -518,63 +544,26 @@ async function runDemo() {
   
   // Display Results
   printHeader("📊 SCRAPED PROPERTY DATA", 'bgGreen');
-  
-  // Basic Property Information
-  const basicInfo = {
-    "Property ID": DEMO_PROPERTY_DATA.property_id,
-    "Address": DEMO_PROPERTY_DATA.address,
-    "Price": `$${DEMO_PROPERTY_DATA.price.toLocaleString()}`,
-    "Status": DEMO_PROPERTY_DATA.status,
-    "MLS Number": DEMO_PROPERTY_DATA.mls_number,
-    "Property Type": DEMO_PROPERTY_DATA.property_type,
-    "Year Built": DEMO_PROPERTY_DATA.year_built,
-    "Lot Size": DEMO_PROPERTY_DATA.lot_size,
-    "Parking Spaces": DEMO_PROPERTY_DATA.parking_spaces
-  };
-  printTable(basicInfo, "🏠 Basic Property Information");
-  
-  // Property Details
-  const propertyDetails = {
-    "Bedrooms": DEMO_PROPERTY_DATA.bedrooms,
-    "Bathrooms": DEMO_PROPERTY_DATA.bathrooms,
-    "Square Footage": `${DEMO_PROPERTY_DATA.sqft.toLocaleString()} sq ft`,
-    "Organization": DEMO_PROPERTY_DATA.organization,
-    "Organization Address": DEMO_PROPERTY_DATA.organization_address,
-    "Listing Date": new Date(DEMO_PROPERTY_DATA.listing_date).toLocaleDateString(),
-    "Last Updated": new Date(DEMO_PROPERTY_DATA.last_updated).toLocaleDateString()
-  };
-  printTable(propertyDetails, "📋 Property Details");
-  
-  // Description
-  console.log(`\n${colors.bright}${colors.cyan}📝 Property Description${colors.reset}`);
-  console.log(`${colors.dim}${'-'.repeat(50)}${colors.reset}`);
-  console.log(`${colors.white}${DEMO_PROPERTY_DATA.description}${colors.reset}`);
-  
-  // Features
-  printJsonData(DEMO_PROPERTY_DATA.features, "✨ Property Features");
-  
-  // Listing Details
-  printJsonData(DEMO_PROPERTY_DATA.details_json, "📋 Listing Details");
-  
-  // Rooms
-  printRoomsTable(DEMO_PROPERTY_DATA.rooms_json);
-  
-  // Showing Schedules
-  printShowingSchedules(showingSchedules);
+
+// Show only the property being scraped (no details) and the schedules
+console.log(`
+${colors.bright}${colors.cyan}Property: ${DEMO_PROPERTY_DATA.property_id} (${DEMO_PROPERTY_DATA.address})${colors.reset}`);
+
+printShowingSchedules(showingSchedules);
   
   // Database Summary
   printHeader("💾 DATABASE SUMMARY", 'bgYellow');
-  const allProperties = getAllProperties();
-  console.log(`${colors.bright}Total properties in database: ${colors.green}${allProperties.length}${colors.reset}`);
-  console.log(`${colors.bright}Latest property: ${colors.cyan}${DEMO_PROPERTY_DATA.address}${colors.reset}`);
-  console.log(`${colors.bright}Organization: ${colors.cyan}${DEMO_PROPERTY_DATA.organization}${colors.reset}`);
-  console.log(`${colors.bright}Showing schedules: ${colors.green}${showingSchedules.reduce((total, day) => total + day.schedules.length, 0)} available slots${colors.reset}`);
+  console.log(`${colors.bright}Affected table: ${colors.cyan}showing_schedules${colors.reset}`);
+  const daysGenerated = showingSchedules.length;
+  const totalSlots = showingSchedules.reduce((sum, day) => sum + day.schedules.length, 0);
+  console.log(`${colors.bright}Days generated: ${colors.green}${daysGenerated}${colors.reset}`);
+  console.log(`${colors.bright}Total slots inserted: ${colors.green}${totalSlots}${colors.reset}`);
   console.log(`${colors.bright}Database location: ${colors.dim}src/data/data.db${colors.reset}`);
-  
+
   // Files Generated
   printHeader("📁 GENERATED FILES", 'bgRed');
   console.log(`${colors.bright}1. Database: ${colors.cyan}src/data/data.db${colors.reset}`);
-  console.log(`${colors.dim}   Contains all scraped property data and showing schedules in SQLite format${colors.reset}`);
+  console.log(`${colors.dim}   Contains showing schedules in SQLite format${colors.reset}`);
   console.log(`${colors.bright}2. Report: ${colors.cyan}src/data/last-scrape.txt${colors.reset}`);
   console.log(`${colors.dim}   Human-readable property report for presentation${colors.reset}`);
   

@@ -6,6 +6,8 @@ import cors from "cors";
 import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
+import { spawn } from "child_process";
+import { randomUUID } from "crypto";
 
 configDotenv();
 
@@ -19,6 +21,225 @@ const PORT = process.env.DASHBOARD_PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.static(__dirname));
+
+const autoBookJobs = new Map();
+
+function createAutoBookJob(propertyAddress, options) {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const job = {
+    id,
+    property: propertyAddress,
+    options,
+    status: "pending",
+    createdAt: now,
+    updatedAt: now,
+    logs: [],
+    subscribers: new Set()
+  };
+  autoBookJobs.set(id, job);
+  return job;
+}
+
+function serializeJob(job, includeLogs = true) {
+  return {
+    id: job.id,
+    property: job.property,
+    status: job.status,
+    options: job.options,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    logs: includeLogs ? job.logs : undefined
+  };
+}
+
+function sendEvent(job, eventName, payload) {
+  job.subscribers.forEach((res) => {
+    res.write(`event: ${eventName}\n`);
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  });
+}
+
+function sanitizeChunk(chunk) {
+  return chunk
+    .toString()
+    .replace(/\x1B\[[0-9;]*m/g, "")
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean);
+}
+
+function appendLog(job, chunk, level = "info") {
+  const lines = sanitizeChunk(chunk);
+  if (!lines.length) return;
+  lines.forEach((line) => {
+    const entry = {
+      id: job.logs.length + 1,
+      timestamp: new Date().toISOString(),
+      level,
+      message: line
+    };
+    job.logs.push(entry);
+    if (job.logs.length > 500) {
+      job.logs.shift();
+    }
+    job.updatedAt = entry.timestamp;
+    sendEvent(job, "log", entry);
+  });
+}
+
+function closeSubscribers(job) {
+  job.subscribers.forEach((res) => res.end());
+  job.subscribers.clear();
+}
+
+function finalizeJob(job, status, message) {
+  job.status = status;
+  job.completedAt = new Date().toISOString();
+  job.updatedAt = job.completedAt;
+  if (message) {
+    appendLog(job, message, status === "failed" ? "error" : "info");
+  }
+  sendEvent(job, "status", serializeJob(job, false));
+  closeSubscribers(job);
+  pruneJobs();
+}
+
+function startAutoBookJob(job) {
+  job.status = "running";
+  job.startedAt = new Date().toISOString();
+  job.updatedAt = job.startedAt;
+  sendEvent(job, "status", serializeJob(job, false));
+  appendLog(job, `Launching auto-book run for "${job.property}"...`);
+
+  const child = spawn(
+    "node",
+    ["auto-book-enhanced.js", job.property],
+    {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        HEADLESS: job.options.headless ? "true" : "false",
+        AUTO_CONFIRM_ONLY: job.options.autoConfirmOnly ? "true" : "false"
+      }
+    }
+  );
+
+  child.stdout.on("data", (data) => appendLog(job, data, "info"));
+  child.stderr.on("data", (data) => appendLog(job, data, "error"));
+  child.on("error", (error) => {
+    if (job.status !== "failed" && job.status !== "completed") {
+      finalizeJob(job, "failed", `Process error: ${error.message}`);
+    }
+  });
+  child.on("close", (code) => {
+    if (job.status === "failed" || job.status === "completed") return;
+    if (code === 0) {
+      finalizeJob(job, "completed", "Auto-book run finished successfully.");
+    } else {
+      finalizeJob(job, "failed", `Process exited with code ${code}.`);
+    }
+  });
+}
+
+function pruneJobs(limit = 20) {
+  if (autoBookJobs.size <= limit) return;
+  const entries = Array.from(autoBookJobs.entries()).sort(
+    (a, b) => new Date(a[1].createdAt) - new Date(b[1].createdAt)
+  );
+  while (entries.length > limit) {
+    const [jobId, job] = entries.shift();
+    closeSubscribers(job);
+    autoBookJobs.delete(jobId);
+  }
+}
+
+app.post("/api/auto-book", (req, res) => {
+  const { property, headless = true, autoConfirmOnly = false } = req.body || {};
+  if (!property || property.trim().length < 5) {
+    return res.status(400).json({
+      success: false,
+      error: "Please provide a property name or address (min 5 characters)."
+    });
+  }
+
+  const job = createAutoBookJob(property.trim(), {
+    headless: headless !== false,
+    autoConfirmOnly: Boolean(autoConfirmOnly)
+  });
+
+  res.status(202).json({
+    success: true,
+    jobId: job.id,
+    job: serializeJob(job, false)
+  });
+
+  setImmediate(() => startAutoBookJob(job));
+});
+
+app.get("/api/auto-book", (req, res) => {
+  const jobs = Array.from(autoBookJobs.values())
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map((job) => serializeJob(job, false));
+  res.json({
+    success: true,
+    jobs
+  });
+});
+
+app.get("/api/auto-book/:jobId", (req, res) => {
+  const job = autoBookJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({
+      success: false,
+      error: "Job not found"
+    });
+  }
+  res.json({
+    success: true,
+    job: serializeJob(job)
+  });
+});
+
+app.get("/api/auto-book/:jobId/stream", (req, res) => {
+  const job = autoBookJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({
+      success: false,
+      error: "Job not found"
+    });
+  }
+
+  res.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive"
+  });
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+
+  res.write(`event: snapshot\n`);
+  res.write(`data: ${JSON.stringify(serializeJob(job, false))}\n\n`);
+  res.write(`event: status\n`);
+  res.write(`data: ${JSON.stringify(serializeJob(job, false))}\n\n`);
+
+  job.logs.forEach((log) => {
+    res.write(`event: log\n`);
+    res.write(`data: ${JSON.stringify(log)}\n\n`);
+  });
+
+  if (job.status === "completed" || job.status === "failed") {
+    return res.end();
+  }
+
+  job.subscribers.add(res);
+  req.on("close", () => {
+    job.subscribers.delete(res);
+  });
+});
 
 // Database helper
 function getDatabase() {
@@ -453,6 +674,10 @@ app.get('/', (req, res) => {
 // Serve dashboard at /dashboard route as well
 app.get('/dashboard', (req, res) => {
   res.sendFile(path.join(__dirname, 'booking-dashboard.html'));
+});
+
+app.get('/auto-book', (req, res) => {
+  res.sendFile(path.join(__dirname, 'auto-book-dashboard.html'));
 });
 
 // 404 handler

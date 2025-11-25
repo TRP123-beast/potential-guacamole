@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BrokerBay Auto-Booking Assistant</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #141e30 0%, #243b55 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #0f172a;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .nav-switcher {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .nav-btn {
+            flex: 1;
+            min-width: 180px;
+            text-align: center;
+            padding: 14px 18px;
+            border-radius: 12px;
+            text-decoration: none;
+            color: #1f2937;
+            background: rgba(255, 255, 255, 0.8);
+            font-weight: 600;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .nav-btn:hover {
+            transform: translateY(-2px);
+            border-color: rgba(99, 102, 241, 0.3);
+        }
+
+        .nav-btn.active {
+            background: #6366f1;
+            color: white;
+            box-shadow: 0 10px 25px rgba(99, 102, 241, 0.35);
+        }
+
+        .hero-card {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 20px;
+            box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
+        }
+
+        .hero-card h1 {
+            font-size: 2.5em;
+            color: #4338ca;
+            margin-bottom: 10px;
+        }
+
+        .hero-text p {
+            color: #4b5563;
+            font-size: 1.05em;
+            line-height: 1.5;
+        }
+
+        .pill-row {
+            margin-top: 15px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .pill {
+            padding: 8px 14px;
+            border-radius: 999px;
+            background: rgba(99, 102, 241, 0.12);
+            color: #4338ca;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+
+        .hero-info {
+            min-width: 220px;
+            background: linear-gradient(135deg, #eef2ff, #e0e7ff);
+            border-radius: 18px;
+            padding: 20px;
+            color: #312e81;
+            flex: 1;
+        }
+
+        .hero-info p {
+            margin-bottom: 8px;
+            font-size: 0.95em;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.96);
+            border-radius: 18px;
+            padding: 24px;
+            box-shadow: 0 20px 45px rgba(15, 23, 42, 0.18);
+        }
+
+        .card h3 {
+            color: #4338ca;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+
+        .input-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            font-weight: 600;
+            color: #1f2937;
+            display: block;
+            margin-bottom: 8px;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 14px 18px;
+            border: 2px solid #e5e7eb;
+            border-radius: 12px;
+            font-size: 1em;
+            transition: border-color 0.3s ease;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #6366f1;
+            box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
+        }
+
+        .helper-text {
+            font-size: 0.85em;
+            color: #6b7280;
+            margin-top: 6px;
+        }
+
+        .toggle {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .toggle input {
+            width: 22px;
+            height: 22px;
+        }
+
+        .action-btn {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 14px;
+            font-size: 1.05em;
+            font-weight: 700;
+            background: linear-gradient(90deg, #7c3aed, #6366f1);
+            color: white;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .action-btn:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        .action-btn:not(:disabled):hover {
+            transform: translateY(-2px);
+            box-shadow: 0 15px 30px rgba(99, 102, 241, 0.4);
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .status-card {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .status-badge {
+            align-self: flex-start;
+            padding: 8px 14px;
+            border-radius: 999px;
+            font-weight: 600;
+            font-size: 0.9em;
+        }
+
+        .status-badge.idle {
+            background: #f3f4f6;
+            color: #4b5563;
+        }
+
+        .status-badge.pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-badge.running {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .status-badge.completed {
+            background: #dcfce7;
+            color: #15803d;
+        }
+
+        .status-badge.failed {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .meta-row {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .meta-row div {
+            flex: 1;
+            min-width: 120px;
+        }
+
+        .meta-row span {
+            display: block;
+            font-size: 0.85em;
+            color: #9ca3af;
+        }
+
+        .meta-row strong {
+            font-size: 1.1em;
+            color: #1f2937;
+        }
+
+        .log-card {
+            min-height: 320px;
+        }
+
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .log-output {
+            background: #0f172a;
+            color: #e2e8f0;
+            border-radius: 14px;
+            padding: 18px;
+            height: 320px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', 'Fira Code', Menlo, monospace;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+
+        .log-line {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .log-line span:first-child {
+            color: #94a3b8;
+            min-width: 95px;
+        }
+
+        .log-line.error {
+            color: #f87171;
+        }
+
+        .log-line.info {
+            color: #c7d2fe;
+        }
+
+        .log-line.warning {
+            color: #fbbf24;
+        }
+
+        .guidelines ul {
+            list-style: disc outside;
+            margin-left: 20px;
+            color: #374151;
+            line-height: 1.6;
+        }
+
+        .guidelines li + li {
+            margin-top: 8px;
+        }
+
+        .note-card ol {
+            list-style: decimal outside;
+            margin-left: 20px;
+            color: #334155;
+            line-height: 1.6;
+        }
+
+        .note-card li + li {
+            margin-top: 8px;
+        }
+
+        .alert {
+            margin-top: 12px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            font-size: 0.9em;
+            font-weight: 500;
+            display: none;
+        }
+
+        .alert.show {
+            display: block;
+        }
+
+        .alert.error {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .alert.success {
+            background: #dcfce7;
+            color: #15803d;
+        }
+
+        .log-actions button {
+            padding: 8px 14px;
+            border-radius: 10px;
+            border: none;
+            background: #e5e7eb;
+            cursor: pointer;
+            font-weight: 600;
+            color: #374151;
+        }
+
+        .log-actions button:hover {
+            background: #d1d5db;
+        }
+
+        @media (max-width: 768px) {
+            .hero-card {
+                flex-direction: column;
+            }
+
+            .log-output {
+                height: 240px;
+            }
+
+            .nav-switcher {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav-switcher">
+            <a href="/dashboard" class="nav-btn">Bookings Dashboard</a>
+            <a href="/auto-book" class="nav-btn active">Auto-Booking Assistant</a>
+        </div>
+
+        <div class="hero-card">
+            <div class="hero-text">
+                <h1>Auto-Booking Assistant</h1>
+                <p>Kick off the full BrokerBay automation run without touching the terminal. Type an address, watch the live feed, and let the assistant log everything into the shared dashboard database.</p>
+                <div class="pill-row">
+                    <span class="pill">Search + Auto-Confirm</span>
+                    <span class="pill">Live Puppeteer Log</span>
+                    <span class="pill">Writes to data.db</span>
+                </div>
+            </div>
+            <div class="hero-info">
+                <p><strong>Profile:</strong> BrokerBay automation</p>
+                <p><strong>Runs:</strong> Puppeteer + stealth mode</p>
+                <p><strong>Output:</strong> Shared bookings dashboard</p>
+                <p><strong>Best results:</strong> Copy the exact MLS address text</p>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h3>Start a new booking run</h3>
+                <form id="autoBookForm">
+                    <div class="input-group">
+                        <label for="propertyInput">Property or address</label>
+                        <input type="text" id="propertyInput" placeholder="266 Brant Avenue, Brantford, ON" autocomplete="off" required>
+                        <div class="helper-text">Use street number + street name + city. Add unit # if applicable.</div>
+                    </div>
+                    <div class="toggle">
+                        <input type="checkbox" id="showBrowser">
+                        <label for="showBrowser">Show Chrome window (disables headless mode)</label>
+                    </div>
+                    <div class="toggle">
+                        <input type="checkbox" id="autoConfirmOnly">
+                        <label for="autoConfirmOnly">Only book AUTO-CONFIRM slots</label>
+                    </div>
+                    <button type="submit" class="action-btn" id="startRunBtn">Launch automation</button>
+                    <div class="alert" id="formAlert"></div>
+                </form>
+            </div>
+
+            <div class="card guidelines">
+                <h3>Usage playbook</h3>
+                <ul>
+                    <li>Copy the exact address string from BrokerBay search so the assistant selects the right listing row.</li>
+                    <li>Keep Chrome signed in to BrokerBay before launching headless runs. Use the visible browser option if the login session expired.</li>
+                    <li>The run writes every successful booking into <code>src/data/data.db</code>, so the dashboard picks it up instantly.</li>
+                    <li>Need the script to wait for auto-confirm slots only? Toggle the AUTO-CONFIRM switch before launching.</li>
+                    <li>Do not close the server window while a run is active—the process log here mirrors the actual CLI output.</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="status-grid">
+            <div class="card status-card">
+                <h3>Job status</h3>
+                <div id="statusBadge" class="status-badge idle">Waiting...</div>
+                <p id="statusProperty">No active jobs yet.</p>
+                <div class="meta-row">
+                    <div>
+                        <span>Started</span>
+                        <strong id="statusStarted">—</strong>
+                    </div>
+                    <div>
+                        <span>Updated</span>
+                        <strong id="statusUpdated">—</strong>
+                    </div>
+                    <div>
+                        <span>Job ID</span>
+                        <strong id="statusJobId">—</strong>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card status-card">
+                <h3>Formatting hints</h3>
+                <p>Examples that search well:</p>
+                <div class="pill-row" style="margin-top: 10px;">
+                    <span class="pill">"50 O'Neill Road #1911, Toronto"</span>
+                    <span class="pill">"17 Bathurst Street 4205, Toronto"</span>
+                    <span class="pill">"275 Larch Street G612, Waterloo"</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card log-card">
+            <div class="log-header">
+                <h3>Live activity</h3>
+                <div class="log-actions">
+                    <button type="button" id="clearLogs">Clear log</button>
+                </div>
+            </div>
+            <div id="logOutput" class="log-output"></div>
+        </div>
+
+        <div class="card note-card">
+            <h3>What happens behind the scenes</h3>
+            <ol>
+                <li>The server spawns <code>node auto-book-enhanced.js &lt;property&gt;</code> with the options you toggled here.</li>
+                <li>The Puppeteer session logs in with your saved profile, searches the listing, books a showing, and hits AUTO-CONFIRM whenever possible.</li>
+                <li>Every console line is streamed back into this page so you can watch progress without touching the CLI.</li>
+                <li>Confirmed bookings flow straight into the shared SQLite database, which powers the dashboard next door.</li>
+            </ol>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('autoBookForm');
+        const propertyInput = document.getElementById('propertyInput');
+        const showBrowserInput = document.getElementById('showBrowser');
+        const autoConfirmInput = document.getElementById('autoConfirmOnly');
+        const startRunBtn = document.getElementById('startRunBtn');
+        const formAlert = document.getElementById('formAlert');
+        const logOutput = document.getElementById('logOutput');
+        const clearLogsBtn = document.getElementById('clearLogs');
+        const statusBadge = document.getElementById('statusBadge');
+        const statusProperty = document.getElementById('statusProperty');
+        const statusStarted = document.getElementById('statusStarted');
+        const statusUpdated = document.getElementById('statusUpdated');
+        const statusJobId = document.getElementById('statusJobId');
+
+        let eventSource = null;
+        let activeJobId = null;
+
+        function setAlert(message, type = 'error') {
+            formAlert.textContent = message;
+            formAlert.className = `alert show ${type}`;
+        }
+
+        function clearAlert() {
+            formAlert.textContent = '';
+            formAlert.className = 'alert';
+        }
+
+        function setFormDisabled(disabled) {
+            propertyInput.disabled = disabled;
+            showBrowserInput.disabled = disabled;
+            autoConfirmInput.disabled = disabled;
+            startRunBtn.disabled = disabled;
+            startRunBtn.textContent = disabled ? 'Launching...' : 'Launch automation';
+        }
+
+        function formatTimestamp(value) {
+            if (!value) return '—';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return value;
+            return date.toLocaleString();
+        }
+
+        function updateStatusCard(job) {
+            const status = job?.status || 'idle';
+            statusBadge.textContent = status === 'pending' ? 'Queued' : status.charAt(0).toUpperCase() + status.slice(1);
+            statusBadge.className = `status-badge ${status}`;
+            statusProperty.textContent = job?.property ? `Property: ${job.property}` : 'No active jobs yet.';
+            statusStarted.textContent = formatTimestamp(job?.startedAt);
+            statusUpdated.textContent = formatTimestamp(job?.updatedAt);
+            statusJobId.textContent = job?.id || '—';
+        }
+
+        function appendLog(entry) {
+            const line = document.createElement('div');
+            line.className = `log-line ${entry.level || 'info'}`;
+            const time = new Date(entry.timestamp);
+            const timeText = Number.isNaN(time.getTime()) ? entry.timestamp : time.toLocaleTimeString();
+            line.innerHTML = `<span>${timeText}</span><span>${entry.message}</span>`;
+            logOutput.appendChild(line);
+            logOutput.scrollTop = logOutput.scrollHeight;
+        }
+
+        function clearLogOutput() {
+            logOutput.innerHTML = '';
+        }
+
+        function closeStream() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        }
+
+        function attachStream(jobId) {
+            closeStream();
+            eventSource = new EventSource(`/api/auto-book/${jobId}/stream`);
+            eventSource.addEventListener('snapshot', (event) => {
+                const snapshot = JSON.parse(event.data);
+                updateStatusCard(snapshot);
+            });
+            eventSource.addEventListener('status', (event) => {
+                const job = JSON.parse(event.data);
+                updateStatusCard(job);
+                if (job.status === 'completed' || job.status === 'failed') {
+                    closeStream();
+                    setFormDisabled(false);
+                }
+            });
+            eventSource.addEventListener('log', (event) => {
+                const entry = JSON.parse(event.data);
+                appendLog(entry);
+            });
+            eventSource.onerror = () => {
+                closeStream();
+                setFormDisabled(false);
+            };
+        }
+
+        async function fetchLatestJob() {
+            try {
+                const response = await fetch('/api/auto-book');
+                const data = await response.json();
+                if (!data.success || !data.jobs.length) {
+                    updateStatusCard(null);
+                    return;
+                }
+                const latest = data.jobs[0];
+                const detailRes = await fetch(`/api/auto-book/${latest.id}`);
+                const detail = await detailRes.json();
+                if (!detail.success) return;
+                const job = detail.job;
+                activeJobId = job.id;
+                updateStatusCard(job);
+                clearLogOutput();
+                job.logs.forEach((log) => appendLog(log));
+                if (job.status === 'running' || job.status === 'pending') {
+                    attachStream(job.id);
+                    setFormDisabled(true);
+                }
+            } catch {
+                updateStatusCard(null);
+            }
+        }
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            clearAlert();
+            const property = propertyInput.value.trim();
+            if (!property) {
+                setAlert('Enter a property address first.');
+                return;
+            }
+            setFormDisabled(true);
+            clearLogOutput();
+            appendLog({ level: 'info', timestamp: new Date().toISOString(), message: `Queued request for "${property}"...` });
+
+            try {
+                const response = await fetch('/api/auto-book', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        property,
+                        headless: !showBrowserInput.checked,
+                        autoConfirmOnly: autoConfirmInput.checked
+                    })
+                });
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || 'Failed to start automation run.');
+                }
+                activeJobId = result.jobId;
+                updateStatusCard(result.job);
+                attachStream(result.jobId);
+            } catch (error) {
+                setAlert(error.message || 'Unable to start the run.');
+                setFormDisabled(false);
+            }
+        });
+
+        clearLogsBtn.addEventListener('click', () => {
+            clearLogOutput();
+        });
+
+        fetchLatestJob();
+    </script>
+</body>
+</html>
+

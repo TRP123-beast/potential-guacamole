@@ -72,13 +72,44 @@ export const loginToBrokerBay = async (page) => {
   try {
     console.log("🔐 Attempting automated login to Broker Bay...");
     
-    // Navigate to the Broker Bay auth page
-    await page.goto("https://auth.brokerbay.com/login?response_type=code&redirect_uri=https%3A%2F%2Fedge.brokerbay.com%2Foauth%2Fcallback&client_id=brokerbay%3Aauth%3Aapp");
+    // Hard-reset BrokerBay auth state so we ALWAYS hit the login flow
+    try {
+      const client = await page.target().createCDPSession();
+      await client.send("Network.clearBrowserCookies").catch(() => {});
+      await client.send("Network.clearBrowserCache").catch(() => {});
+    } catch (e) {
+      console.log("⚠️ Could not clear browser cookies/cache via CDP:", e.message);
+    }
+
+    // Clear storage on app domain
+    try {
+      await page.goto("https://edge.brokerbay.com/#/my_business", {
+        waitUntil: "domcontentloaded",
+      });
+      await waitFor(1000);
+      await page.evaluate(() => {
+        try {
+          localStorage.clear();
+          sessionStorage.clear();
+        } catch {}
+      });
+    } catch (e) {
+      console.log("⚠️ Could not clear storage on edge.brokerbay.com:", e.message);
+    }
+
+    // Navigate to the BrokerBay auth login page (always start here)
+    await page.goto(
+      "https://auth.brokerbay.com/login?response_type=code&redirect_uri=https%3A%2F%2Fedge.brokerbay.com%2Foauth%2Fcallback&client_id=brokerbay%3Aauth%3Aapp",
+      { waitUntil: "domcontentloaded" }
+    );
     await waitFor(3000);
     
     // STEP 1: Enter email and click Continue
     console.log("📧 Step 1: Entering email...");
-    await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email"]', { timeout: 10000 });
+    await page.waitForSelector(
+      'input[type="email"], input[name="email"], input[placeholder*="email"]',
+      { timeout: 15000 }
+    );
     
     const emailInput = await page.$('input[type="email"], input[name="email"], input[placeholder*="email"]');
     if (emailInput) {

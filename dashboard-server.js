@@ -114,18 +114,19 @@ function startAutoBookJob(job) {
   sendEvent(job, "status", serializeJob(job, false));
   appendLog(job, `Launching auto-book run for "${job.property}"...`);
 
-  const child = spawn(
-    "node",
-    ["auto-book-enhanced.js", job.property],
-    {
-      cwd: __dirname,
-      env: {
-        ...process.env,
-        HEADLESS: job.options.headless ? "true" : "false",
-        AUTO_CONFIRM_ONLY: job.options.autoConfirmOnly ? "true" : "false"
-      }
+  const args = ["auto-book-enhanced.js", job.property];
+  if (job.options.preferredTime) {
+    args.push(job.options.preferredTime);
+  }
+
+  const child = spawn("node", args, {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      HEADLESS: job.options.headless ? "true" : "false",
+      AUTO_CONFIRM_ONLY: job.options.autoConfirmOnly ? "true" : "false"
     }
-  );
+  });
 
   child.stdout.on("data", (data) => appendLog(job, data, "info"));
   child.stderr.on("data", (data) => appendLog(job, data, "error"));
@@ -157,7 +158,12 @@ function pruneJobs(limit = 20) {
 }
 
 app.post("/api/auto-book", (req, res) => {
-  const { property, headless = true, autoConfirmOnly = false } = req.body || {};
+  const {
+    property,
+    headless = true,
+    autoConfirmOnly = false,
+    preferredTime
+  } = req.body || {};
   if (!property || property.trim().length < 5) {
     return res.status(400).json({
       success: false,
@@ -167,7 +173,9 @@ app.post("/api/auto-book", (req, res) => {
 
   const job = createAutoBookJob(property.trim(), {
     headless: headless !== false,
-    autoConfirmOnly: Boolean(autoConfirmOnly)
+    autoConfirmOnly: Boolean(autoConfirmOnly),
+    preferredTime:
+      typeof preferredTime === "string" ? preferredTime.trim() : ""
   });
 
   res.status(202).json({
@@ -248,6 +256,51 @@ function getDatabase() {
     db.pragma('foreign_keys = OFF'); 
   } catch { 
     db.exec("PRAGMA foreign_keys = OFF"); 
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS bookings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      listing_id TEXT,
+      property_address TEXT,
+      booking_date TEXT,
+      booking_time TEXT,
+      duration TEXT,
+      user_name TEXT,
+      user_email TEXT,
+      organization TEXT,
+      showing_type TEXT,
+      status TEXT,
+      auto_confirmed INTEGER DEFAULT 0,
+      booking_url TEXT,
+      screenshot_path TEXT,
+      confirmation_message TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  const columns = db.prepare("PRAGMA table_info(bookings)").all();
+  const columnNames = columns.map((c) => c.name);
+  const expectedColumns = [
+    { name: "listing_id", type: "TEXT" },
+    { name: "property_address", type: "TEXT" },
+    { name: "booking_date", type: "TEXT" },
+    { name: "booking_time", type: "TEXT" },
+    { name: "duration", type: "TEXT" },
+    { name: "user_name", type: "TEXT" },
+    { name: "user_email", type: "TEXT" },
+    { name: "organization", type: "TEXT" },
+    { name: "showing_type", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "auto_confirmed", type: "INTEGER", defaultExpr: "0" },
+    { name: "booking_url", type: "TEXT" },
+    { name: "screenshot_path", type: "TEXT" },
+    { name: "confirmation_message", type: "TEXT" },
+    { name: "created_at", type: "TEXT", defaultExpr: "CURRENT_TIMESTAMP" }
+  ];
+  for (const col of expectedColumns) {
+    if (!columnNames.includes(col.name)) {
+      const defaultClause = col.defaultExpr ? ` DEFAULT ${col.defaultExpr}` : "";
+      db.exec(`ALTER TABLE bookings ADD COLUMN ${col.name} ${col.type}${defaultClause};`);
+    }
   }
   return db;
 }

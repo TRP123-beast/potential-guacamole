@@ -41,11 +41,12 @@ const USER_PROFILE = {
 // ==================== CLI ARGUMENT PARSING ====================
 const args = process.argv.slice(2);
 let propertyAddress = args[0];
+let preferredTimeArg = args[1] || process.env.PREFERRED_TIME || "";
 
 if (!propertyAddress) {
   console.error("\n❌ Error: Please provide a property address to search");
-  console.log("\nUsage: node auto-book-enhanced.js <property_address>");
-  console.log("Example: node auto-book-enhanced.js '266 Brant Avenue'\n");
+  console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time]");
+  console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM'\n");
   console.log("The script will:");
   console.log("  1. Search for the property on BrokerBay");
   console.log("  2. Select it from search results");
@@ -98,13 +99,38 @@ function setupDatabase() {
       organization TEXT,
       showing_type TEXT,
       status TEXT,
-      auto_confirmed BOOLEAN,
+      auto_confirmed INTEGER DEFAULT 0,
       booking_url TEXT,
       screenshot_path TEXT,
       confirmation_message TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  const columns = db.prepare("PRAGMA table_info(bookings)").all();
+  const columnNames = columns.map((c) => c.name);
+  const expectedColumns = [
+    { name: "listing_id", type: "TEXT" },
+    { name: "property_address", type: "TEXT" },
+    { name: "booking_date", type: "TEXT" },
+    { name: "booking_time", type: "TEXT" },
+    { name: "duration", type: "TEXT" },
+    { name: "user_name", type: "TEXT" },
+    { name: "user_email", type: "TEXT" },
+    { name: "organization", type: "TEXT" },
+    { name: "showing_type", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "auto_confirmed", type: "INTEGER", defaultExpr: "0" },
+    { name: "booking_url", type: "TEXT" },
+    { name: "screenshot_path", type: "TEXT" },
+    { name: "confirmation_message", type: "TEXT" },
+    { name: "created_at", type: "TEXT", defaultExpr: "CURRENT_TIMESTAMP" }
+  ];
+  for (const col of expectedColumns) {
+    if (!columnNames.includes(col.name)) {
+      const defaultClause = col.defaultExpr ? ` DEFAULT ${col.defaultExpr}` : "";
+      db.exec(`ALTER TABLE bookings ADD COLUMN ${col.name} ${col.type}${defaultClause};`);
+    }
+  }
   return db;
 }
 
@@ -260,11 +286,11 @@ async function selectPropertyFromResults(page, searchQuery) {
   
   // Look for property rows/cards in search results
   const resultSelectors = [
-    'table tbody tr',
-    '.property-row',
-    '.listing-row',
-    '[ng-repeat*="listing"]',
-    '.result-item'
+    "table tbody tr",
+    ".property-row",
+    ".listing-row",
+    "[ng-repeat*=\"listing\"]",
+    ".result-item"
   ];
   
   let propertyFound = false;
@@ -346,12 +372,13 @@ async function clickBookShowingButton(page) {
     'a.bb-btn'
   ];
   const labelVariants = [
-    'book showing',
-    'book a showing',
-    'book showing request',
-    'book showing appointment',
-    'book tour',
-    'request showing'
+    "book showing",
+    "book a showing",
+    "book showing request",
+    "book showing appointment",
+    "book tour",
+    "request showing",
+    "request a showing"
   ];
   
   let buttonClicked = false;
@@ -369,12 +396,32 @@ async function clickBookShowingButton(page) {
   }
   
   if (!buttonClicked) {
-    // Try XPath text search as a fallback
-    const bookShowingButton = await page.$x("//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'book showing')] | //a[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'book showing')]");
-    if (bookShowingButton.length > 0) {
-      log(`  ✓ Found 'Book Showing' button via XPath`, 'dim');
-      buttonClicked = await clickElementSafely(page, bookShowingButton[0], "'Book Showing' button");
+    const handle = await page.evaluateHandle(() => {
+      const labels = [
+        "book showing",
+        "book a showing",
+        "book showing request",
+        "book showing appointment",
+        "book tour",
+        "request showing",
+        "request a showing"
+      ];
+      const candidates = Array.from(
+        document.querySelectorAll("button, a[role='button'], [role='button']")
+      );
+      return (
+        candidates.find((el) => {
+          const text = (el.innerText || el.textContent || "").toLowerCase();
+          return labels.some((l) => text.includes(l));
+        }) || null
+      );
+    });
+    const el = handle.asElement();
+    if (el) {
+      log(`  ✓ Found 'Book Showing' button via text scan`, "dim");
+      buttonClicked = await clickElementSafely(page, el, "'Book Showing' button");
     }
+    await handle.dispose();
   }
   
   if (!buttonClicked) {
@@ -532,91 +579,17 @@ async function fillProfileStep(page) {
   }, USER_PROFILE.name, USER_PROFILE.email, USER_PROFILE.organization);
   
   if (profileState.hasName && profileState.hasEmail && profileState.hasOrg) {
-    log(`  ℹ️ Profile info detected on page. Skipping manual input.`, 'dim');
-    await takeScreenshot(page, '01_profile_verified');
-    return true;
+    log(`  ℹ️ Profile info detected on page. Leaving fields as-is.`, 'dim');
+  } else {
+    log(
+      `  ℹ️ Proceeding without editing profile fields (detected: name=${profileState.hasName}, email=${profileState.hasEmail}, org=${profileState.hasOrg}).`,
+      'dim'
+    );
   }
   
-  if (!profileState.hasEditableInputs) {
-    log(`  ⚠️ Could not locate editable profile inputs. Continuing with visible info.`, 'yellow');
-    await takeScreenshot(page, '01_profile_readonly');
-    return true;
-  }
-  
-  // Attempt manual entry only if info is missing and inputs exist
-  const nameSelectors = [
-    'input[name="name"]',
-    'input[ng-model*="name"]',
-    'input[placeholder*="Name"]',
-    'input[type="text"]'
-  ];
-  
-  let nameEntered = false;
-  for (const selector of nameSelectors) {
-    if (await safeType(page, selector, USER_PROFILE.name, "name")) {
-      nameEntered = true;
-      break;
-    }
-  }
-  
-  if (!nameEntered) {
-    log(`  ⚠️ Name input not found; proceeding with existing value.`, 'yellow');
-  }
-  
-  const emailSelectors = [
-    'input[type="email"]',
-    'input[name="email"]',
-    'input[ng-model*="email"]',
-    'input[placeholder*="email" i]'
-  ];
-  
-  let emailEntered = false;
-  for (const selector of emailSelectors) {
-    if (await safeType(page, selector, USER_PROFILE.email, "email")) {
-      emailEntered = true;
-      break;
-    }
-  }
-  
-  if (!emailEntered) {
-    log(`  ⚠️ Email input not found; proceeding with existing value.`, 'yellow');
-  }
-  
-  const showingTypeSelectors = [
-    'select[name="showingType"]',
-    'select[ng-model*="showing"]',
-    'select[ng-model*="type"]'
-  ];
-  
-  for (const selector of showingTypeSelectors) {
-    const element = await page.$(selector);
-    if (element) {
-      const options = await page.evaluate((sel) => {
-        const select = document.querySelector(sel);
-        if (!select) return [];
-        return Array.from(select.options).map(opt => ({
-          value: opt.value,
-          text: opt.text
-        }));
-      }, selector);
-      
-      if (options.length) {
-        log(`  Available showing types: ${options.map(o => o.text).join(', ')}`, 'dim');
-        const matchingOption = options.find(opt => 
-          opt.text.includes('Buyer') || opt.value.includes('Buyer')
-        );
-        
-        if (matchingOption) {
-          await page.select(selector, matchingOption.value);
-          log(`  ✓ Selected showing type: ${matchingOption.text}`, 'dim');
-          break;
-        }
-      }
-    }
-  }
-  
-  await takeScreenshot(page, '01_profile_updated');
-  logStep(1, "Profile fields verified/updated", 'success');
+  await takeScreenshot(page, '01_profile_verified');
+  logStep(1, "Profile fields verified (no manual edits applied)", 'success');
+  return true;
 }
 
 // ==================== STEP 2: SELECT DATE ====================
@@ -799,14 +772,14 @@ async function selectTimeAndDurationStep(page) {
       try {
         const value = await page.evaluate(el => el.value, radio);
         const label = await page.evaluate(el => {
-          const labelElement = el.closest('label') || el.parentElement;
-          return labelElement ? labelElement.textContent : '';
+          const labelElement = el.closest("label") || el.parentElement;
+          return labelElement ? labelElement.textContent : "";
         }, radio);
         
         if (value == USER_PROFILE.preferredDuration || label.includes(USER_PROFILE.preferredDuration.toString())) {
           await radio.click();
-          await wait(1500); // Wait for time slots to update
-          log(`  ✓ Selected duration: ${USER_PROFILE.preferredDuration} minutes`, 'dim');
+          await wait(1500);
+          log(`  ✓ Selected duration: ${USER_PROFILE.preferredDuration} minutes`, "dim");
           durationSet = true;
           break;
         }
@@ -818,13 +791,11 @@ async function selectTimeAndDurationStep(page) {
     if (durationSet) break;
   }
   
-  // Now select time slot
   await wait(1500);
   
-  // Get all available time slots
   const timeSlotSelectors = [
     'button[class*="time"]:not([disabled])',
-    '.time-slot:not(.disabled)',
+    ".time-slot:not(.disabled)",
     '[class*="slot"]:not([disabled])',
     'div[class*="time"]',
     'button[ng-click*="time"]'
@@ -833,23 +804,58 @@ async function selectTimeAndDurationStep(page) {
   let selectedSlot = null;
   let autoConfirm = false;
   
+  function parseTimeToMinutes(label) {
+    if (!label) return null;
+    const lower = label.toLowerCase();
+    const match = lower.match(/(\d{1,2}):(\d{2})/);
+    if (!match) return null;
+    let hour = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const isPm = lower.includes("pm");
+    const isAm = lower.includes("am");
+    if (isPm && hour < 12) hour += 12;
+    if (isAm && hour === 12) hour = 0;
+    if (!isPm && !isAm && hour >= 1 && hour <= 6) hour += 12;
+    return hour * 60 + minutes;
+  }
+  
+  function pickBestSlot(candidateSlots, preferredTime) {
+    if (!candidateSlots.length) return null;
+    if (!preferredTime) return null;
+    const prefMinutes = parseTimeToMinutes(preferredTime);
+    if (prefMinutes == null) return null;
+    let best = null;
+    let bestDelta = Infinity;
+    for (const slot of candidateSlots) {
+      const m = parseTimeToMinutes(slot.text);
+      if (m == null) continue;
+      if (m < prefMinutes) continue;
+      const delta = m - prefMinutes;
+      if (delta < bestDelta) {
+        best = slot;
+        bestDelta = delta;
+      }
+    }
+    return best;
+  }
+  
+  const normalizedPreferredTime = (preferredTimeArg || "").trim();
+  
   for (const selector of timeSlotSelectors) {
     const slots = await page.$$(selector);
     
     if (slots.length > 0) {
-      log(`  Found ${slots.length} available time slots`, 'dim');
-      
-      // Analyze each slot for auto-confirm capability
+      log(`  Found ${slots.length} available time slots`, "dim");
       const slotData = [];
       
       for (let i = 0; i < slots.length; i++) {
         try {
           const data = await page.evaluate((el) => {
-            const text = el.textContent || el.innerText || '';
-            const classes = el.className || '';
+            const text = el.textContent || el.innerText || "";
+            const classes = el.className || "";
             const style = window.getComputedStyle(el);
-            const bgColor = (style.backgroundColor || '').toLowerCase();
-            const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+            const bgColor = (style.backgroundColor || "").toLowerCase();
+            const isDisabled = el.disabled || el.getAttribute("aria-disabled") === "true";
             const isRed = (() => {
               const match = bgColor.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
               if (!match) return false;
@@ -864,21 +870,21 @@ async function selectTimeAndDurationStep(page) {
             })();
             const lowerText = text.toLowerCase();
             const isAutoConfirm =
-              classes.toLowerCase().includes('green') ||
-              classes.toLowerCase().includes('auto') ||
-              lowerText.includes('auto') ||
+              classes.toLowerCase().includes("green") ||
+              classes.toLowerCase().includes("auto") ||
+              lowerText.includes("auto") ||
               isGreen;
             const isUnavailable =
               isDisabled ||
-              classes.toLowerCase().includes('booked') ||
-              classes.toLowerCase().includes('unavailable') ||
-              classes.toLowerCase().includes('blocked') ||
-              lowerText.includes('booked') ||
-              lowerText.includes('unavailable') ||
+              classes.toLowerCase().includes("booked") ||
+              classes.toLowerCase().includes("unavailable") ||
+              classes.toLowerCase().includes("blocked") ||
+              lowerText.includes("booked") ||
+              lowerText.includes("unavailable") ||
               isRed;
             const isSelected =
-              classes.toLowerCase().includes('selected') ||
-              classes.toLowerCase().includes('active') ||
+              classes.toLowerCase().includes("selected") ||
+              classes.toLowerCase().includes("active") ||
               isGreen;
             return {
               text: text.trim(),
@@ -896,69 +902,79 @@ async function selectTimeAndDurationStep(page) {
         }
       }
       
-      // Mark preferred time slots (10:00 AM – not 10:00 PM) for prioritization
       slotData.forEach(slot => {
-        const lowerText = (slot.text || '').toLowerCase();
-        const hasTen = lowerText.includes('10:00');
-        const isAm = lowerText.includes('am');
-        const isPm = lowerText.includes('pm');
+        const lowerText = (slot.text || "").toLowerCase();
+        const hasTen = lowerText.includes("10:00");
+        const isAm = lowerText.includes("am");
+        const isPm = lowerText.includes("pm");
         slot.isPreferredTime = hasTen && isPm && !isAm;
       });
       
-      const candidateSlots = slotData.filter(slot => !slot.isUnavailable && !slot.isSelected);
+      let candidateSlots = slotData.filter(slot => !slot.isUnavailable && !slot.isSelected);
       
       if (!candidateSlots.length) {
-        log(`  ⚠️ Slots found, but all were unavailable or already taken.`, 'yellow');
+        log(`  ⚠️ Slots found, but all were unavailable or already taken.`, "yellow");
         continue;
       }
       
-      // Display available slots
-      log(`\n  Available time slots:`, 'cyan');
+      log(`\n  Available time slots:`, "cyan");
       candidateSlots.forEach((slot, idx) => {
         const markers = [];
-        if (slot.isAutoConfirm) markers.push('AUTO-CONFIRM');
-        if (slot.isPreferredTime) markers.push('PREFERRED (10:00 AM)');
-        log(`    ${idx + 1}. ${slot.text}${markers.length ? ` [${markers.join(', ')}]` : ''}`, slot.isAutoConfirm ? 'green' : 'white');
+        if (slot.isAutoConfirm) markers.push("AUTO-CONFIRM");
+        if (slot.isPreferredTime) markers.push("PREFERRED (10:00 AM)");
+        log(`    ${idx + 1}. ${slot.text}${markers.length ? ` [${markers.join(", ")}]` : ""}`, slot.isAutoConfirm ? "green" : "white");
       });
       
-      // 1) Prefer a 10:00 AM slot if available and not unavailable/red
-      const preferredSlots = candidateSlots.filter(s => s.isPreferredTime);
-      
-      if (preferredSlots.length > 0) {
-        selectedSlot = preferredSlots[0];
-        autoConfirm = selectedSlot.isAutoConfirm;
-        log(`\n  Selected preferred 10:00 AM slot: ${selectedSlot.text}`, 'cyan');
-      } else {
-        // 2) Otherwise, preserve previous auto-confirm preference behaviour
-        if (USER_PROFILE.autoConfirmOnly) {
-          const autoConfirmSlots = candidateSlots.filter(s => s.isAutoConfirm);
-          if (autoConfirmSlots.length > 0) {
-            selectedSlot = autoConfirmSlots[0];
-            autoConfirm = true;
-            log(`\n  Selected AUTO-CONFIRM slot: ${selectedSlot.text}`, 'green');
-          } else {
-            throw new Error("No auto-confirm slots available (AUTO_CONFIRM_ONLY is enabled)");
-          }
-        } else {
-          // Try to get auto-confirm first, otherwise take the first available
-          const autoConfirmSlots = candidateSlots.filter(s => s.isAutoConfirm);
-          if (autoConfirmSlots.length > 0) {
-            selectedSlot = autoConfirmSlots[0];
-            autoConfirm = true;
-            log(`\n  Selected AUTO-CONFIRM slot: ${selectedSlot.text}`, 'green');
-          } else {
-            selectedSlot = candidateSlots[0];
-            log(`\n  Selected regular slot: ${selectedSlot.text}`, 'cyan');
-          }
+      let preferredSlot = null;
+      if (normalizedPreferredTime) {
+        const baseCandidates = USER_PROFILE.autoConfirmOnly ? candidateSlots.filter(s => s.isAutoConfirm) : candidateSlots;
+        preferredSlot = pickBestSlot(baseCandidates, normalizedPreferredTime);
+        if (!preferredSlot && !USER_PROFILE.autoConfirmOnly) {
+          preferredSlot = pickBestSlot(candidateSlots, normalizedPreferredTime);
+        }
+        if (preferredSlot) {
+          log(`\n  Selected slot closest to requested time "${normalizedPreferredTime}": ${preferredSlot.text}`, "cyan");
         }
       }
       
-      // Click the selected slot
+      if (!preferredSlot) {
+        const preferredSlots = candidateSlots.filter(s => s.isPreferredTime);
+        if (preferredSlots.length > 0) {
+          selectedSlot = preferredSlots[0];
+          autoConfirm = selectedSlot.isAutoConfirm;
+          log(`\n  Selected preferred 10:00 AM slot: ${selectedSlot.text}`, "cyan");
+        } else {
+          if (USER_PROFILE.autoConfirmOnly) {
+            const autoConfirmSlots = candidateSlots.filter(s => s.isAutoConfirm);
+            if (autoConfirmSlots.length > 0) {
+              selectedSlot = autoConfirmSlots[0];
+              autoConfirm = true;
+              log(`\n  Selected AUTO-CONFIRM slot: ${selectedSlot.text}`, "green");
+            } else {
+              throw new Error("No auto-confirm slots available (AUTO_CONFIRM_ONLY is enabled)");
+            }
+          } else {
+            const autoConfirmSlots = candidateSlots.filter(s => s.isAutoConfirm);
+            if (autoConfirmSlots.length > 0) {
+              selectedSlot = autoConfirmSlots[0];
+              autoConfirm = true;
+              log(`\n  Selected AUTO-CONFIRM slot: ${selectedSlot.text}`, "green");
+            } else {
+              selectedSlot = candidateSlots[0];
+              log(`\n  Selected regular slot: ${selectedSlot.text}`, "cyan");
+            }
+          }
+        }
+      } else {
+        selectedSlot = preferredSlot;
+        autoConfirm = preferredSlot.isAutoConfirm;
+      }
+      
       if (selectedSlot) {
         await clickElementSafely(page, selectedSlot.element, `time slot ${selectedSlot.text}`);
         await wait(CONFIG.waitAfterAction);
         await waitForAutoConfirmButton(page, 20000);
-        log(`  ✓ Time slot clicked`, 'dim');
+        log(`  ✓ Time slot clicked`, "dim");
         break;
       }
     }
@@ -968,8 +984,8 @@ async function selectTimeAndDurationStep(page) {
     throw new Error("No available time slots found");
   }
   
-  await takeScreenshot(page, '03_time_selected');
-  logStep(3, "Time and duration selected successfully", 'success');
+  await takeScreenshot(page, "03_time_selected");
+  logStep(3, "Time and duration selected successfully", "success");
   
   return {
     time: selectedSlot.text,
@@ -1020,6 +1036,33 @@ async function submitBooking(page) {
   }
   
   await autoConfirmHandle.dispose();
+  
+  // Strategy 1b: Look for top-right Book/Request Showing button on booking page
+  if (!submitted) {
+    const bookingHandle = await page.evaluateHandle(() => {
+      const candidates = Array.from(document.querySelectorAll('button, a[role="button"], [role="button"]'));
+      const regex = /(book[\s-]*showing|request[\s-]*showing)/i;
+      return candidates.find(el => {
+        const label = (el.innerText || el.textContent || '').trim();
+        return regex.test(label);
+      }) || null;
+    });
+    
+    const bookingElement = bookingHandle.asElement();
+    
+    if (bookingElement) {
+      buttonText = (await page.evaluate(el => el.textContent || '', bookingElement)).trim();
+      log(`  ✓ Found booking action button: "${buttonText}"`, 'green');
+      await bookingElement.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+      await wait(500);
+      await bookingElement.click();
+      submitted = true;
+      isAutoConfirm = buttonText.toLowerCase().includes('auto');
+      log(`  ✓ Clicked booking action button`, 'green');
+    }
+    
+    await bookingHandle.dispose();
+  }
   
   // Strategy 2: Look for button with green color class or auto-confirm class
   if (!submitted) {

@@ -419,6 +419,11 @@
                         <input type="text" id="propertyInput" placeholder="266 Brant Avenue, Brantford, ON" autocomplete="off" required>
                         <div class="helper-text">Use street number + street name + city. Add unit # if applicable.</div>
                     </div>
+                    <div class="input-group">
+                        <label for="timeInput">Preferred time (optional)</label>
+                        <input type="text" id="timeInput" placeholder="10:00 AM" autocomplete="off">
+                        <div class="helper-text">Works like the CLI: <code>node auto-book-enhanced.js "Address" "10:00 AM"</code>. If taken, the script moves forward to the next free slot.</div>
+                    </div>
                     <div class="toggle">
                         <input type="checkbox" id="showBrowser">
                         <label for="showBrowser">Show Chrome window (disables headless mode)</label>
@@ -436,6 +441,7 @@
                 <h3>Usage playbook</h3>
                 <ul>
                     <li>Copy the exact address string from BrokerBay search so the assistant selects the right listing row.</li>
+                    <li>Optionally set a preferred time like <code>10:00 AM</code>; the runner behaves exactly like <code>node auto-book-enhanced.js "Address" "10:00 AM"</code> and will walk forward to the next available slot if that exact time is taken.</li>
                     <li>Keep Chrome signed in to BrokerBay before launching headless runs. Use the visible browser option if the login session expired.</li>
                     <li>The run writes every successful booking into <code>src/data/data.db</code>, so the dashboard picks it up instantly.</li>
                     <li>Need the script to wait for auto-confirm slots only? Toggle the AUTO-CONFIRM switch before launching.</li>
@@ -489,8 +495,8 @@
         <div class="card note-card">
             <h3>What happens behind the scenes</h3>
             <ol>
-                <li>The server spawns <code>node auto-book-enhanced.js &lt;property&gt;</code> with the options you toggled here.</li>
-                <li>The Puppeteer session logs in with your saved profile, searches the listing, books a showing, and hits AUTO-CONFIRM whenever possible.</li>
+                    <li>The server spawns <code>node auto-book-enhanced.js &lt;property&gt; [&lt;preferred time&gt;]</code> with the options you toggled here.</li>
+                    <li>The Puppeteer session logs in with your saved profile, searches the listing, books a showing, and hits AUTO-CONFIRM whenever possible.</li>
                 <li>Every console line is streamed back into this page so you can watch progress without touching the CLI.</li>
                 <li>Confirmed bookings flow straight into the shared SQLite database, which powers the dashboard next door.</li>
             </ol>
@@ -501,6 +507,7 @@
         const form = document.getElementById('autoBookForm');
         const propertyInput = document.getElementById('propertyInput');
         const showBrowserInput = document.getElementById('showBrowser');
+        const timeInput = document.getElementById('timeInput');
         const autoConfirmInput = document.getElementById('autoConfirmOnly');
         const startRunBtn = document.getElementById('startRunBtn');
         const formAlert = document.getElementById('formAlert');
@@ -527,6 +534,7 @@
 
         function setFormDisabled(disabled) {
             propertyInput.disabled = disabled;
+            timeInput.disabled = disabled;
             showBrowserInput.disabled = disabled;
             autoConfirmInput.disabled = disabled;
             startRunBtn.disabled = disabled;
@@ -626,6 +634,7 @@
             event.preventDefault();
             clearAlert();
             const property = propertyInput.value.trim();
+            const preferredTime = timeInput.value.trim();
             if (!property) {
                 setAlert('Enter a property address first.');
                 return;
@@ -640,6 +649,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         property,
+                        preferredTime: preferredTime || undefined,
                         headless: !showBrowserInput.checked,
                         autoConfirmOnly: autoConfirmInput.checked
                     })

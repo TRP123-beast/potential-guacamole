@@ -416,8 +416,13 @@
                 <form id="autoBookForm">
                     <div class="input-group">
                         <label for="propertyInput">Property or address</label>
-                        <input type="text" id="propertyInput" placeholder="266 Brant Avenue, Brantford, ON" autocomplete="off" required>
-                        <div class="helper-text">Use street number + street name + city. Add unit # if applicable.</div>
+                        <input type="text" id="propertyInput" placeholder="33 Singer Court #3008, Toronto, ON ..." autocomplete="off" required>
+                        <div class="helper-text">
+                            Paste the full MLS address if you want. The assistant will automatically keep only
+                            <strong>street number + street name + optional unit</strong>, e.g. 
+                            <code>78 A Queen Street 301</code> from
+                            <code>78 A Queen Street 301, Bonnechere Valley, ON K0J 1T0, CA</code>.
+                        </div>
                     </div>
                     <div class="input-group">
                         <label for="timeInput">Preferred time (optional)</label>
@@ -541,6 +546,13 @@
             startRunBtn.textContent = disabled ? 'Launching...' : 'Launch automation';
         }
 
+        function normalizePropertyAddress(raw) {
+            if (!raw) return '';
+            const firstComma = raw.indexOf(',');
+            const truncated = firstComma >= 0 ? raw.slice(0, firstComma) : raw;
+            return truncated.trim();
+        }
+
         function formatTimestamp(value) {
             if (!value) return '—';
             const date = new Date(value);
@@ -633,12 +645,15 @@
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
             clearAlert();
-            const property = propertyInput.value.trim();
+            const rawProperty = propertyInput.value.trim();
+            const property = normalizePropertyAddress(rawProperty);
             const preferredTime = timeInput.value.trim();
             if (!property) {
                 setAlert('Enter a property address first.');
                 return;
             }
+            // Update the input so the user sees the normalized value that will be used for search
+            propertyInput.value = property;
             setFormDisabled(true);
             clearLogOutput();
             appendLog({ level: 'info', timestamp: new Date().toISOString(), message: `Queued request for "${property}"...` });

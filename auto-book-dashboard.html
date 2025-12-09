@@ -429,6 +429,11 @@
                         <input type="text" id="timeInput" placeholder="10:00 AM" autocomplete="off">
                         <div class="helper-text">Works like the CLI: <code>node auto-book-enhanced.js "Address" "10:00 AM"</code>. If taken, the script moves forward to the next free slot.</div>
                     </div>
+                    <div class="input-group">
+                        <label for="dateInput">Preferred date (optional)</label>
+                        <input type="text" id="dateInput" placeholder="15" autocomplete="off">
+                        <div class="helper-text">Enter the day of the month (e.g. "15"). If left blank, it defaults to today or the earliest available date.</div>
+                    </div>
                     <div class="toggle">
                         <input type="checkbox" id="showBrowser">
                         <label for="showBrowser">Show Chrome window (disables headless mode)</label>
@@ -513,6 +518,7 @@
         const propertyInput = document.getElementById('propertyInput');
         const showBrowserInput = document.getElementById('showBrowser');
         const timeInput = document.getElementById('timeInput');
+        const dateInput = document.getElementById('dateInput');
         const autoConfirmInput = document.getElementById('autoConfirmOnly');
         const startRunBtn = document.getElementById('startRunBtn');
         const formAlert = document.getElementById('formAlert');
@@ -540,6 +546,7 @@
         function setFormDisabled(disabled) {
             propertyInput.disabled = disabled;
             timeInput.disabled = disabled;
+            dateInput.disabled = disabled;
             showBrowserInput.disabled = disabled;
             autoConfirmInput.disabled = disabled;
             startRunBtn.disabled = disabled;
@@ -648,6 +655,7 @@
             const rawProperty = propertyInput.value.trim();
             const property = normalizePropertyAddress(rawProperty);
             const preferredTime = timeInput.value.trim();
+            const preferredDate = dateInput.value.trim();
             if (!property) {
                 setAlert('Enter a property address first.');
                 return;
@@ -665,6 +673,7 @@
                     body: JSON.stringify({
                         property,
                         preferredTime: preferredTime || undefined,
+                        preferredDate: preferredDate || undefined,
                         headless: !showBrowserInput.checked,
                         autoConfirmOnly: autoConfirmInput.checked
                     })

@@ -42,11 +42,12 @@ const USER_PROFILE = {
 const args = process.argv.slice(2);
 let propertyAddress = args[0];
 let preferredTimeArg = args[1] || process.env.PREFERRED_TIME || "";
+let preferredDateArg = args[2] || process.env.PREFERRED_DATE || "";
 
 if (!propertyAddress) {
   console.error("\n❌ Error: Please provide a property address to search");
-  console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time]");
-  console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM'\n");
+  console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time] [preferred_date]");
+  console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM' '15'\n");
   console.log("The script will:");
   console.log("  1. Search for the property on BrokerBay");
   console.log("  2. Select it from search results");
@@ -593,10 +594,48 @@ async function fillProfileStep(page) {
 }
 
 // ==================== STEP 2: SELECT DATE ====================
-async function selectDateStep(page) {
-  logStep(2, "Selecting available date (Step 2 - Select Date)", 'info');
+async function selectDateStep(page, preferredDate = null) {
+  logStep(2, `Selecting date${preferredDate ? ` (Preferred: ${preferredDate})` : ""} (Step 2 - Select Date)`, 'info');
   
   await wait(2000); // Wait for calendar to load
+
+  if (preferredDate) {
+    const dayToSelect = preferredDate.includes('-') 
+      ? new Date(preferredDate).getDate().toString() 
+      : preferredDate;
+      
+    log(`  Trying to select preferred date: ${dayToSelect}`, 'dim');
+    
+    // Try to find and click the specific date
+    const dateClicked = await page.evaluate((day) => {
+      const selectors = [
+        'td.day:not(.disabled):not(.old):not(.new)',
+        'button[class*="date"]:not([disabled])',
+        '.calendar-day:not(.disabled)',
+        'td.available'
+      ];
+      
+      for (const selector of selectors) {
+        const elements = document.querySelectorAll(selector);
+        for (const el of elements) {
+          if (el.textContent.trim() === day) {
+            el.click();
+            return true;
+          }
+        }
+      }
+      return false;
+    }, dayToSelect);
+
+    if (dateClicked) {
+      log(`  ✓ Selected preferred date: ${dayToSelect}`, 'green');
+      await wait(2000); // Wait for slots to reload
+      await takeScreenshot(page, '02_date_selected_preferred');
+      return true;
+    } else {
+      log(`  ⚠️ Preferred date ${dayToSelect} not found or unavailable. Falling back to default logic.`, 'yellow');
+    }
+  }
   
   // If time slots are already visible, keep whatever date BrokerBay has selected by default.
   const hasVisibleTimeSlots = await page.evaluate(() => {
@@ -1328,7 +1367,7 @@ async function autoBookShowing() {
     
     // Now we're on the booking page - execute booking steps
     await fillProfileStep(page);
-    await selectDateStep(page);
+    await selectDateStep(page, preferredDateArg);
     const timeInfo = await selectTimeAndDurationStep(page);
     const submitResult = await submitBooking(page);
     const confirmation = await verifyConfirmation(page);

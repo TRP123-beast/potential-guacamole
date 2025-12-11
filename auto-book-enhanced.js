@@ -281,67 +281,90 @@ async function searchForProperty(page, searchQuery) {
 
 // ==================== STEP 0.8: SELECT PROPERTY FROM RESULTS ====================
 async function selectPropertyFromResults(page, searchQuery) {
-  logStep("0.8", "Selecting property from search results", 'info');
-  
+  logStep("0.8", "Selecting property from search results", "info");
+
   await wait(3000);
-  
-  // Look for property rows/cards in search results
-  const resultSelectors = [
+
+  const listingUrlPattern = /\/listing\/[a-f0-9]{24}\/view/i;
+  const searchRoot = searchQuery.toLowerCase().split(",")[0].trim();
+
+  const rowSelectors = [
     "table tbody tr",
-    ".property-row",
     ".listing-row",
-    "[ng-repeat*=\"listing\"]",
-    ".result-item"
+    ".property-row",
+    "[ng-repeat*=\"listing\"]"
   ];
-  
-  let propertyFound = false;
-  
-  for (const selector of resultSelectors) {
-    const results = await page.$$(selector);
-    
-    if (results.length > 0) {
-      log(`  Found ${results.length} search results`, 'dim');
-      
-      // Try to find the property that matches our search
-      for (let i = 0; i < Math.min(results.length, 5); i++) {
-        try {
-          const text = await page.evaluate(el => el.textContent, results[i]);
-          const containsSearch = text && text.toLowerCase().includes(searchQuery.toLowerCase().split(',')[0]);
-          
-          if (containsSearch) {
-            log(`  ✓ Found matching property: ${searchQuery}`, 'green');
-            const clickSuccess = await clickElementSafely(page, results[i], 'search result');
-            if (clickSuccess) {
-              propertyFound = true;
-              break;
-            }
-          }
-        } catch (error) {
-          log(`  ⚠️ Could not evaluate search result text: ${error.message}`, 'yellow');
-          continue;
+
+  let targetRow = null;
+
+  // Find the best matching row in the search results
+  for (const selector of rowSelectors) {
+    const rows = await page.$$(selector);
+    if (!rows.length) continue;
+
+    log(`  Found ${rows.length} rows with selector "${selector}"`, "dim");
+
+    for (const row of rows) {
+      try {
+        const text = await page.evaluate(el => el.textContent || "", row);
+        if (!text) continue;
+        const lower = text.toLowerCase();
+        if (lower.includes(searchRoot)) {
+          targetRow = row;
+          log("  ✓ Found matching row for property search", "green");
+          break;
         }
+      } catch {
+        continue;
       }
-      
-      // If no exact match, click the first result
-      if (!propertyFound && results.length > 0) {
-        log(`  Clicking first search result`, 'yellow');
-        const clickSuccess = await clickElementSafely(page, results[0], 'first search result');
-        propertyFound = clickSuccess;
-      }
-      
-      if (propertyFound) break;
     }
+
+    // If we didn't find an exact match, fall back to the first row
+    if (!targetRow && rows.length) {
+      targetRow = rows[0];
+      log("  ⚠️ No exact match found. Falling back to first search result row.", "yellow");
+    }
+
+    if (targetRow) break;
   }
-  
-  if (!propertyFound) {
-    throw new Error("Could not find property in search results");
+
+  if (!targetRow) {
+    await takeScreenshot(page, "00_no_search_rows_found");
+    throw new Error("Could not find property in search results (no rows found). Check screenshot: 00_no_search_rows_found*.png");
   }
-  
-  // Wait for property page to load
+
+  const beforeUrl = page.url();
+  log(`  Current URL before clicking result: ${beforeUrl}`, "dim");
+
+  // Click the row and wait for the hash-based URL to change to the listing view pattern.
+  log("  Clicking result row and waiting for listing URL ...", "dim");
+
+  await Promise.all([
+    clickElementSafely(page, targetRow, "search result row"),
+    page
+      .waitForFunction(
+        () => /\/listing\/[a-f0-9]{24}\/view/i.test(window.location.href),
+        { timeout: CONFIG.navigationTimeout }
+      )
+      .catch(() => {
+        // We'll validate URL below and throw a clearer error if it never changed
+        log("  ⚠️ URL did not change to listing view pattern within timeout", "yellow");
+      })
+  ]);
+
+  const afterUrl = page.url();
+  log(`  URL after clicking result: ${afterUrl}`, "dim");
+
+  if (!listingUrlPattern.test(afterUrl)) {
+    await takeScreenshot(page, "00_listing_url_not_reached");
+    throw new Error(`Listing page not reached; current URL: ${afterUrl}`);
+  }
+
   await wait(CONFIG.pageLoadWait);
-  await takeScreenshot(page, '00_property_page');
-  
-  logStep("0.8", "Property page loaded", 'success');
+  await takeScreenshot(page, "00_property_page");
+
+  logStep("0.8", "Property page loaded", "success");
+  return page;
 }
 
 // ==================== STEP 0.9: CLICK "BOOK SHOWING" BUTTON ====================
@@ -1348,29 +1371,29 @@ async function autoBookShowing() {
     // Search for property
     await searchForProperty(page, propertyAddress);
     
-    // Select property from search results
-    await selectPropertyFromResults(page, propertyAddress);
+    // Select property from search results (may open in same or new tab)
+    const listingPage = await selectPropertyFromResults(page, propertyAddress);
     
     // Extract listing ID from property page URL
-    const listingIdFromUrl = extractListingIdFromUrl(page);
+    const listingIdFromUrl = extractListingIdFromUrl(listingPage);
     if (listingIdFromUrl) {
       detectedListingId = listingIdFromUrl;
       log(`  ✓ Detected Listing ID: ${detectedListingId}`, 'dim');
     } else {
-      log(`  ⚠️ Could not detect listing ID from URL: ${page.url()}`, 'yellow');
+      log(`  ⚠️ Could not detect listing ID from URL: ${listingPage.url()}`, 'yellow');
     }
     
     // Click "Book Showing" button on property page
-    await clickBookShowingButton(page);
-    bookingPageUrl = page.url();
+    await clickBookShowingButton(listingPage);
+    bookingPageUrl = listingPage.url();
     log(`  📄 Booking URL: ${bookingPageUrl}`, 'dim');
     
     // Now we're on the booking page - execute booking steps
-    await fillProfileStep(page);
-    await selectDateStep(page, preferredDateArg);
-    const timeInfo = await selectTimeAndDurationStep(page);
-    const submitResult = await submitBooking(page);
-    const confirmation = await verifyConfirmation(page);
+    await fillProfileStep(listingPage);
+    await selectDateStep(listingPage, preferredDateArg);
+    const timeInfo = await selectTimeAndDurationStep(listingPage);
+    const submitResult = await submitBooking(listingPage);
+    const confirmation = await verifyConfirmation(listingPage);
     const autoConfirmed = Boolean(submitResult.isAutoConfirm || timeInfo.autoConfirm);
     const bookingStatus = confirmation.isConfirmed || autoConfirmed ? 'Confirmed' : 'Pending';
     

@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  auto-book:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DASHBOARD_PORT=3000
+      - HEADLESS=true
+      # Add other environment variables here if needed, or use env_file
+    volumes:
+      - ./src/data:/app/src/data # Persist database and screenshots
+

@@ -623,25 +623,40 @@ async function selectDateStep(page, preferredDate = null) {
   await wait(2000); // Wait for calendar to load
 
   if (preferredDate) {
-    const dayToSelect = preferredDate.includes('-') 
-      ? new Date(preferredDate).getDate().toString() 
+    const dayToSelect = preferredDate.includes('-')
+      ? new Date(preferredDate).getDate().toString()
       : preferredDate;
-      
+
     log(`  Trying to select preferred date: ${dayToSelect}`, 'dim');
-    
-    // Try to find and click the specific date
-    const dateClicked = await page.evaluate((day) => {
+
+    // Try to find and click the specific date (tolerant of extra markup/text)
+    const dateClicked = await page.evaluate((dayString) => {
+      const targetDay = parseInt(dayString, 10);
+      if (Number.isNaN(targetDay)) return false;
+
       const selectors = [
         'td.day:not(.disabled):not(.old):not(.new)',
         'button[class*="date"]:not([disabled])',
         '.calendar-day:not(.disabled)',
         'td.available'
       ];
-      
+
+      const normalizeCellDay = (el) => {
+        // Prefer aria-label if present (e.g. "Friday, December 12, 2025")
+        const aria = el.getAttribute('aria-label') || '';
+        const fromAria = aria.match(/\b(\d{1,2})\b/);
+        if (fromAria) return parseInt(fromAria[1], 10);
+
+        const text = (el.textContent || '').trim();
+        const match = text.match(/\b(\d{1,2})\b/);
+        return match ? parseInt(match[1], 10) : NaN;
+      };
+
       for (const selector of selectors) {
-        const elements = document.querySelectorAll(selector);
+        const elements = Array.from(document.querySelectorAll(selector));
         for (const el of elements) {
-          if (el.textContent.trim() === day) {
+          const cellDay = normalizeCellDay(el);
+          if (!Number.isNaN(cellDay) && cellDay === targetDay) {
             el.click();
             return true;
           }

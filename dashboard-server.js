@@ -115,8 +115,12 @@ function startAutoBookJob(job) {
   appendLog(job, `Launching auto-book run for "${job.property}"...`);
 
   const args = ["auto-book-enhanced.js", job.property];
-  if (job.options.preferredTime) {
-    args.push(job.options.preferredTime);
+  
+  if (job.options.preferredTime || job.options.preferredDate) {
+    args.push(job.options.preferredTime || "");
+  }
+  if (job.options.preferredDate) {
+    args.push(job.options.preferredDate);
   }
 
   const child = spawn("node", args, {
@@ -162,7 +166,8 @@ app.post("/api/auto-book", (req, res) => {
     property,
     headless = true,
     autoConfirmOnly = false,
-    preferredTime
+    preferredTime,
+    preferredDate
   } = req.body || {};
   if (!property || property.trim().length < 5) {
     return res.status(400).json({
@@ -175,7 +180,9 @@ app.post("/api/auto-book", (req, res) => {
     headless: headless !== false,
     autoConfirmOnly: Boolean(autoConfirmOnly),
     preferredTime:
-      typeof preferredTime === "string" ? preferredTime.trim() : ""
+      typeof preferredTime === "string" ? preferredTime.trim() : "",
+    preferredDate:
+      typeof preferredDate === "string" ? preferredDate.trim() : ""
   });
 
   res.status(202).json({

@@ -243,6 +243,47 @@
             color: #b91c1c;
         }
 
+        .scheduled-card {
+            margin-top: 20px;
+        }
+
+        .scheduled-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        .scheduled-subtitle {
+            font-size: 0.9em;
+            color: #6b7280;
+        }
+
+        .scheduled-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .scheduled-item {
+            border: none;
+            padding: 8px 14px;
+            border-radius: 999px;
+            background: rgba(16, 185, 129, 0.12);
+            color: #047857;
+            font-size: 0.9em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s ease, transform 0.1s ease;
+        }
+
+        .scheduled-item:hover {
+            background: rgba(16, 185, 129, 0.2);
+            transform: translateY(-1px);
+        }
+
         .meta-row {
             display: flex;
             gap: 20px;
@@ -392,6 +433,14 @@
             <a href="/auto-book" class="nav-btn active">Auto-Booking Assistant</a>
         </div>
 
+        <div class="card scheduled-card">
+            <div class="scheduled-header">
+                <h3>Scheduled properties</h3>
+                <span class="scheduled-subtitle" id="scheduledSubtitle">No scheduled properties yet.</span>
+            </div>
+            <div id="scheduledList" class="scheduled-list"></div>
+        </div>
+
         <div class="hero-card">
             <div class="hero-text">
                 <h1>Auto-Booking Assistant</h1>
@@ -529,6 +578,8 @@
         const statusStarted = document.getElementById('statusStarted');
         const statusUpdated = document.getElementById('statusUpdated');
         const statusJobId = document.getElementById('statusJobId');
+        const scheduledList = document.getElementById('scheduledList');
+        const scheduledSubtitle = document.getElementById('scheduledSubtitle');
 
         let eventSource = null;
         let activeJobId = null;
@@ -595,6 +646,41 @@
             if (eventSource) {
                 eventSource.close();
                 eventSource = null;
+            }
+        }
+
+        function renderScheduledProperties(items) {
+            scheduledList.innerHTML = '';
+            if (!items || !items.length) {
+                scheduledSubtitle.textContent = 'No scheduled properties yet.';
+                return;
+            }
+            scheduledSubtitle.textContent = 'Click a property to prefill the booking form.';
+            items.forEach((item) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'scheduled-item';
+                const label = item.address || item.property_id;
+                btn.textContent = label;
+                btn.addEventListener('click', () => {
+                    propertyInput.value = label;
+                    propertyInput.focus();
+                });
+                scheduledList.appendChild(btn);
+            });
+        }
+
+        async function fetchScheduledProperties() {
+            try {
+                const res = await fetch('/api/scheduled-properties');
+                const data = await res.json();
+                if (!data.success) {
+                    renderScheduledProperties([]);
+                    return;
+                }
+                renderScheduledProperties(data.data || []);
+            } catch {
+                renderScheduledProperties([]);
             }
         }
 
@@ -696,6 +782,7 @@
         });
 
         fetchLatestJob();
+        fetchScheduledProperties();
     </script>
 </body>
 </html>

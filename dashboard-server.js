@@ -625,6 +625,55 @@ app.get('/api/properties', (req, res) => {
   }
 });
 
+app.get('/api/scheduled-properties', (req, res) => {
+  const db = getDatabase();
+
+  try {
+    const tables = db
+      .prepare(`
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name IN ('processed_showing_requests', 'properties')
+      `)
+      .all();
+
+    const names = new Set(tables.map((t) => t.name));
+    if (!names.has('processed_showing_requests') || !names.has('properties')) {
+      return res.json({
+        success: true,
+        data: [],
+        message: 'No scheduled properties found'
+      });
+    }
+
+    const rows = db
+      .prepare(
+        `
+        SELECT DISTINCT psr.property_id, p.address
+        FROM processed_showing_requests psr
+        JOIN properties p ON p.property_id = psr.property_id
+        WHERE (psr.status IN ('pending','scheduled','rescheduled') OR psr.status IS NULL)
+          AND p.address IS NOT NULL
+          AND p.address <> ''
+        ORDER BY psr.created_at
+      `
+      )
+      .all();
+
+    res.json({
+      success: true,
+      data: rows
+    });
+  } catch (error) {
+    console.error('Error fetching scheduled properties:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  } finally {
+    db.close();
+  }
+});
+
 // Export bookings to CSV
 app.get('/api/export/csv', (req, res) => {
   const db = getDatabase();
@@ -773,6 +822,7 @@ app.listen(PORT, () => {
   console.log('  GET    /api/bookings/:id      - Get single booking');
   console.log('  GET    /api/stats             - Get statistics');
   console.log('  GET    /api/properties        - Get properties');
+  console.log('  GET    /api/scheduled-properties - Get scheduled properties for auto-book');
   console.log('  PATCH  /api/bookings/:id      - Update booking');
   console.log('  DELETE /api/bookings/:id      - Delete booking');
   console.log('  GET    /api/export/csv        - Export to CSV');

@@ -339,23 +339,61 @@ async function selectPropertyFromResults(page, searchQuery) {
   // Click the row and wait for the hash-based URL to change to the listing view pattern.
   log("  Clicking result row and waiting for listing URL ...", "dim");
 
-  await Promise.all([
-    clickElementSafely(page, targetRow, "search result row"),
-    page
-      .waitForFunction(
-        () => /\/listing\/[a-f0-9]{24}\/view/i.test(window.location.href),
-        { timeout: CONFIG.navigationTimeout }
-      )
-      .catch(() => {
-        // We'll validate URL below and throw a clearer error if it never changed
-        log("  ⚠️ URL did not change to listing view pattern within timeout", "yellow");
-      })
-  ]);
+  await clickElementSafely(page, targetRow, "search result row");
+
+  // Try to detect navigation either by URL change OR by listing UI appearing.
+  let listingViewDetected = false;
+
+  // 1) Prefer URL change if BrokerBay still updates the hash.
+  try {
+    await page.waitForFunction(
+      () => /\/listing\/[a-f0-9]{24}\/view/i.test(window.location.href),
+      { timeout: CONFIG.navigationTimeout }
+    );
+    listingViewDetected = true;
+  } catch {
+    log("  ⚠️ URL did not change to listing view pattern within timeout", "yellow");
+  }
 
   const afterUrl = page.url();
   log(`  URL after clicking result: ${afterUrl}`, "dim");
 
-  if (!listingUrlPattern.test(afterUrl)) {
+  // 2) Fallback: some BrokerBay layouts keep the URL but open a listing panel.
+  if (!listingViewDetected) {
+    try {
+      listingViewDetected = await page.evaluate(() => {
+        const labels = [
+          "book showing",
+          "book a showing",
+          "book showing request",
+          "book showing appointment",
+          "book tour",
+          "request showing",
+          "request a showing"
+        ];
+        const buttons = Array.from(
+          document.querySelectorAll("button, a[role='button'], [role='button']")
+        );
+        const hasBookButton = buttons.some((el) => {
+          const text = (el.innerText || el.textContent || "").toLowerCase();
+          return labels.some((l) => text.includes(l));
+        });
+        if (hasBookButton) return true;
+
+        const detailSelectors = [
+          ".listing-view",
+          ".bb-listing-view",
+          "[data-testid*='listing-view']",
+          "[class*='listing-details']"
+        ];
+        return detailSelectors.some((sel) => document.querySelector(sel));
+      });
+    } catch {
+      listingViewDetected = false;
+    }
+  }
+
+  if (!listingViewDetected && !listingUrlPattern.test(afterUrl)) {
     await takeScreenshot(page, "00_listing_url_not_reached");
     throw new Error(`Listing page not reached; current URL: ${afterUrl}`);
   }

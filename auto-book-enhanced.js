@@ -272,8 +272,27 @@ async function searchForProperty(page, searchQuery) {
     throw new Error("Could not find search bar");
   }
   
-  // Wait for search results to load
-  await wait(5000);
+  // Wait for search results to actually load (not just a fixed timeout)
+  log(`  ⏳ Waiting for search results to load...`, 'dim');
+  
+  try {
+    await page.waitForFunction(
+      () => {
+        const rows = Array.from(document.querySelectorAll('table tbody tr'));
+        const validRows = rows.filter(row => {
+          const text = (row.textContent || '').trim();
+          return text.length > 50 && !text.toLowerCase().includes('loading');
+        });
+        return validRows.length > 0;
+      },
+      { timeout: 20000 }
+    );
+    log(`  ✓ Search results loaded`, 'dim');
+  } catch (e) {
+    log(`  ⚠️ Timeout waiting for results, proceeding anyway`, 'yellow');
+  }
+  
+  await wait(2000);
   await takeScreenshot(page, '00_search_results');
   
   logStep("0.7", "Search completed", 'success');
@@ -285,7 +304,7 @@ async function selectPropertyFromResults(page, searchQuery) {
 
   await wait(3000);
 
-  const listingUrlPattern = /\/listing\/[a-f0-9]{24}\/view/i;
+  const listingUrlPattern = /\/listing\/[^/]+\/view/i;
   const searchRoot = searchQuery.toLowerCase().split(",")[0].trim();
 
   const rowSelectors = [
@@ -304,25 +323,40 @@ async function selectPropertyFromResults(page, searchQuery) {
 
     log(`  Found ${rows.length} rows with selector "${selector}"`, "dim");
 
+    // Filter out empty/invalid rows
+    const validRows = [];
     for (const row of rows) {
       try {
         const text = await page.evaluate(el => el.textContent || "", row);
-        if (!text) continue;
-        const lower = text.toLowerCase();
-        if (lower.includes(searchRoot)) {
-          targetRow = row;
-          log("  ✓ Found matching row for property search", "green");
-          break;
-        }
+        // Skip rows with very little content (likely headers or empty states)
+        if (!text || text.trim().length < 30) continue;
+        validRows.push({ row, text });
       } catch {
         continue;
       }
     }
 
-    // If we didn't find an exact match, fall back to the first row
-    if (!targetRow && rows.length) {
-      targetRow = rows[0];
-      log("  ⚠️ No exact match found. Falling back to first search result row.", "yellow");
+    if (validRows.length === 0) {
+      log(`  ⚠️ Found ${rows.length} rows but none contain valid listing data`, "yellow");
+      continue;
+    }
+
+    log(`  ✓ Found ${validRows.length} valid listing rows`, "dim");
+
+    // Try to find exact match
+    for (const { row, text } of validRows) {
+      const lower = text.toLowerCase();
+      if (lower.includes(searchRoot)) {
+        targetRow = row;
+        log("  ✓ Found matching row for property search", "green");
+        break;
+      }
+    }
+
+    // If we didn't find an exact match, fall back to the first valid row
+    if (!targetRow && validRows.length) {
+      targetRow = validRows[0].row;
+      log("  ⚠️ No exact match found. Falling back to first valid search result row.", "yellow");
     }
 
     if (targetRow) break;
@@ -330,7 +364,7 @@ async function selectPropertyFromResults(page, searchQuery) {
 
   if (!targetRow) {
     await takeScreenshot(page, "00_no_search_rows_found");
-    throw new Error("Could not find property in search results (no rows found). Check screenshot: 00_no_search_rows_found*.png");
+    throw new Error("Could not find property in search results (no valid rows found). This usually means the search returned no results or the page did not load properly. Check screenshot: 00_no_search_rows_found*.png");
   }
 
   const beforeUrl = page.url();
@@ -342,26 +376,24 @@ async function selectPropertyFromResults(page, searchQuery) {
   await clickElementSafely(page, targetRow, "search result row");
 
   // Try to detect navigation either by URL change OR by listing UI appearing.
-  let listingViewDetected = false;
-
-  // 1) Prefer URL change if BrokerBay still updates the hash.
-  try {
-    await page.waitForFunction(
-      () => /\/listing\/[a-f0-9]{24}\/view/i.test(window.location.href),
-      { timeout: CONFIG.navigationTimeout }
-    );
-    listingViewDetected = true;
-  } catch {
-    log("  ⚠️ URL did not change to listing view pattern within timeout", "yellow");
-  }
-
-  const afterUrl = page.url();
-  log(`  URL after clicking result: ${afterUrl}`, "dim");
-
-  // 2) Fallback: some BrokerBay layouts keep the URL but open a listing panel.
-  if (!listingViewDetected) {
+  const detectListingViewOnce = async () => {
+    // 1) Prefer URL change if BrokerBay still updates the hash.
+    if (listingUrlPattern.test(page.url())) {
+      return true;
+    }
     try {
-      listingViewDetected = await page.evaluate(() => {
+      await page.waitForFunction(
+        () => /\/listing\/[^/]+\/view/i.test(window.location.href),
+        { timeout: 1500 }
+      );
+      return true;
+    } catch {
+      // fall through
+    }
+
+    // 2) Fallback: some layouts keep the URL but open a listing panel.
+    try {
+      return await page.evaluate(() => {
         const labels = [
           "book showing",
           "book a showing",
@@ -389,13 +421,92 @@ async function selectPropertyFromResults(page, searchQuery) {
         return detailSelectors.some((sel) => document.querySelector(sel));
       });
     } catch {
-      listingViewDetected = false;
+      return false;
     }
+  };
+
+  const detectListingView = async (timeoutMs = CONFIG.navigationTimeout) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (await detectListingViewOnce()) return true;
+      await wait(750);
+    }
+    return false;
+  };
+
+  let listingViewDetected = await detectListingView(3000);
+
+  const afterUrl = page.url();
+  log(`  URL after clicking result: ${afterUrl}`, "dim");
+
+  // Deep fallback: force navigation via link or data-id inside the row.
+  if (!listingViewDetected && !listingUrlPattern.test(afterUrl)) {
+    log("  ⚠️ Forcing navigation via row link / data-id fallback", "yellow");
+    try {
+      const forcedNav = await page.evaluate((row) => {
+        if (!row) return null;
+
+        const clickEl = (el) => {
+          if (!el) return false;
+          el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+          el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+          el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          return true;
+        };
+
+        const link =
+          row.querySelector("a[href*='/listing/']") ||
+          row.querySelector("a[href*='listing']") ||
+          row.querySelector("a[data-href*='listing']");
+        if (link && link.getAttribute("href")) {
+          const href = link.getAttribute("href");
+          clickEl(link);
+          return { type: "link", href };
+        }
+
+        const id =
+          row.getAttribute("data-id") ||
+          row.getAttribute("data-listing-id") ||
+          row.getAttribute("listing-id") ||
+          (row.dataset && (row.dataset.id || row.dataset.listingId));
+        if (id) {
+          const href = `#/listing/${id}/view`;
+          window.location.href = href;
+          return { type: "id", href };
+        }
+
+        const button =
+          row.querySelector("button, [role='button'], a") ||
+          row.querySelector("td, div, span");
+        if (button && clickEl(button)) {
+          return { type: "button" };
+        }
+
+        // As a last resort, try dblclick + Enter on the row
+        row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+        row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+        row.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+        return { type: "dblclick" };
+
+        return null;
+      }, targetRow);
+
+      if (forcedNav) {
+        log(`  ⚠️ Fallback navigation attempted (${forcedNav.type}${forcedNav.href ? `: ${forcedNav.href}` : ""})`, "yellow");
+      } else {
+        log("  ⚠️ No link/data-id/button found in row for forced navigation", "yellow");
+      }
+    } catch (e) {
+      log(`  ⚠️ Forced navigation attempt failed: ${e.message}`, "yellow");
+    }
+
+    // Re-check after forced navigation attempt (full timeout again).
+    listingViewDetected = await detectListingView(CONFIG.navigationTimeout);
   }
 
-  if (!listingViewDetected && !listingUrlPattern.test(afterUrl)) {
+  if (!listingViewDetected && !listingUrlPattern.test(page.url())) {
     await takeScreenshot(page, "00_listing_url_not_reached");
-    throw new Error(`Listing page not reached; current URL: ${afterUrl}`);
+    throw new Error(`Listing page not reached; current URL: ${page.url()}`);
   }
 
   await wait(CONFIG.pageLoadWait);

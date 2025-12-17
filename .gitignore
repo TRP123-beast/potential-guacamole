@@ -1,3 +1,40 @@
 scrapper/
 .env
+.env.*
 .cursor/
+
+# Dependencies
+node_modules/
+
+# Database and data files
+src/data/*.db
+src/data/*.db-shm
+src/data/*.db-wal
+src/data/screenshots/*.png
+
+# Chrome profile (contains saved credentials)
+chrome-profile/
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backups
+backups/
+*.backup
+
+# Temporary files
+tmp/
+temp/
+*.tmp

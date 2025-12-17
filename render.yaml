@@ -1,0 +1,53 @@
+services:
+  - type: web
+    name: brokerbay-auto-booking
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter  # Change to 'free' for testing, 'starter' for production
+    region: oregon  # Choose: oregon, frankfurt, singapore, ohio
+    branch: main
+    
+    healthCheckPath: /api/health
+    
+    envVars:
+      - key: DASHBOARD_PORT
+        value: 3000
+      
+      - key: NODE_ENV
+        value: production
+      
+      - key: HEADLESS
+        value: true
+      
+      - key: ENABLE_AUTO_FETCH
+        value: true
+      
+      - key: FETCH_INTERVAL_MINUTES
+        value: 12
+      
+      # These should be added manually in Render dashboard for security
+      - key: SUPABASE_PROJECT_URL
+        sync: false
+      
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      
+      - key: USER_NAME
+        sync: false
+      
+      - key: USER_EMAIL
+        sync: false
+      
+      - key: USER_ORGANIZATION
+        sync: false
+    
+    # Persistent disk for SQLite database
+    disk:
+      name: brokerbay-data
+      mountPath: /app/src/data
+      sizeGB: 1
+

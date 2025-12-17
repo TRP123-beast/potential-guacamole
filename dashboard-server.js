@@ -15,7 +15,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.DASHBOARD_PORT || 3000;
+// Railway and other platforms set PORT dynamically, prioritize that over DASHBOARD_PORT
+const PORT = process.env.PORT || process.env.DASHBOARD_PORT || 3000;
 
 // Middleware
 app.use(cors());

@@ -1,0 +1,62 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+DEPLOYMENT.md
+ENV_TEMPLATE.md
+*.md
+
+# Node
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test
+tests
+*.test.js
+*.spec.js
+
+# Build artifacts
+dist
+build
+
+# Logs
+logs
+*.log
+
+# Chrome profile (will be mounted as volume if needed)
+chrome-profile
+
+# Screenshots (will be in mounted volume)
+src/data/screenshots/*
+
+# Temporary files
+tmp
+temp
+*.tmp
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+

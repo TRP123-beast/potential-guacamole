@@ -7,7 +7,8 @@ services:
     ports:
       - "${PORT:-3000}:3000"
     environment:
-      # Server Configuration
+      # Server Configuration (PORT takes precedence for cloud platforms)
+      - PORT=${PORT:-3000}
       - DASHBOARD_PORT=3000
       - NODE_ENV=production
       

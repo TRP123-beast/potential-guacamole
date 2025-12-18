@@ -770,61 +770,189 @@ async function selectDateStep(page, preferredDate = null) {
   logStep(2, `Selecting date${preferredDate ? ` (Preferred: ${preferredDate})` : ""} (Step 2 - Select Date)`, 'info');
   
   await wait(2000); // Wait for calendar to load
+  
+  // Get current date info for validation
+  const now = new Date();
+  const currentDay = now.getDate();
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
 
+  // Validate and process preferred date if provided
   if (preferredDate) {
-    const dayToSelect = preferredDate.includes('-')
-      ? new Date(preferredDate).getDate().toString()
-      : preferredDate;
+    let dayToSelect;
+    
+    // Handle different input formats
+    if (preferredDate.includes('-')) {
+      // Format: "YYYY-MM-DD" or "2025-12-25"
+      const dateObj = new Date(preferredDate);
+      dayToSelect = dateObj.getDate();
+      
+      // Validate it's in the current month and year
+      if (dateObj.getMonth() !== currentMonth || dateObj.getFullYear() !== currentYear) {
+        log(`  ⚠️ Preferred date ${preferredDate} is not in the current month. Using day ${dayToSelect} instead.`, 'yellow');
+      }
+    } else {
+      // Format: just the day number (e.g., "25")
+      dayToSelect = parseInt(preferredDate, 10);
+    }
+    
+    // Validate the day is valid
+    if (isNaN(dayToSelect) || dayToSelect < 1 || dayToSelect > 31) {
+      log(`  ⚠️ Invalid date: ${preferredDate}. Must be between 1-31.`, 'yellow');
+    } else if (dayToSelect < currentDay) {
+      log(`  ⚠️ Date ${dayToSelect} is in the past. Current day is ${currentDay}. Will try to select it anyway (may be available for next month).`, 'yellow');
+    } else {
+      log(`  ✓ Valid date requested: ${dayToSelect} (Current day: ${currentDay})`, 'dim');
+    }
 
-    log(`  Trying to select preferred date: ${dayToSelect}`, 'dim');
+    log(`  🔍 Looking for date ${dayToSelect} in calendar...`, 'dim');
 
-    // Try to find and click the specific date (tolerant of extra markup/text)
-    const dateClicked = await page.evaluate((dayString) => {
-      const targetDay = parseInt(dayString, 10);
-      if (Number.isNaN(targetDay)) return false;
+    // Enhanced date selection with better error handling
+    const dateSelectionResult = await page.evaluate((targetDayStr) => {
+      const targetDay = parseInt(targetDayStr, 10);
+      if (Number.isNaN(targetDay)) return { success: false, reason: 'Invalid day number' };
 
+      // Comprehensive selectors for BrokerBay calendar
       const selectors = [
+        // BrokerBay specific selectors
         'td.day:not(.disabled):not(.old):not(.new)',
+        'td.available:not(.disabled)',
+        '.calendar-day:not(.disabled):not(.old):not(.new)',
+        // Generic calendar selectors
         'button[class*="date"]:not([disabled])',
-        '.calendar-day:not(.disabled)',
-        'td.available'
+        'div[class*="day"]:not([class*="disabled"])',
+        '[role="gridcell"]:not([aria-disabled="true"])',
+        // Fallback to any clickable date element
+        'td.day',
+        '.calendar-day',
+        'button[class*="day"]'
       ];
 
       const normalizeCellDay = (el) => {
-        // Prefer aria-label if present (e.g. "Friday, December 12, 2025")
+        // Try aria-label first (most reliable)
         const aria = el.getAttribute('aria-label') || '';
-        const fromAria = aria.match(/\b(\d{1,2})\b/);
-        if (fromAria) return parseInt(fromAria[1], 10);
+        const ariaMatch = aria.match(/\b(\d{1,2})\b/);
+        if (ariaMatch) {
+          return parseInt(ariaMatch[1], 10);
+        }
 
-        const text = (el.textContent || '').trim();
-        const match = text.match(/\b(\d{1,2})\b/);
-        return match ? parseInt(match[1], 10) : NaN;
+        // Try data attributes
+        const dataDate = el.getAttribute('data-date') || el.getAttribute('data-day');
+        if (dataDate) {
+          const parsed = parseInt(dataDate, 10);
+          if (!isNaN(parsed)) return parsed;
+        }
+
+        // Try text content
+        const text = (el.textContent || el.innerText || '').trim();
+        // Match only standalone numbers (not "Dec 25" but "25")
+        const textMatch = text.match(/^\s*(\d{1,2})\s*$/);
+        if (textMatch) {
+          return parseInt(textMatch[1], 10);
+        }
+
+        return NaN;
       };
 
+      const isElementDisabled = (el) => {
+        // Check various disabled states
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
+        const classes = el.className || '';
+        if (classes.includes('disabled') || classes.includes('old') || classes.includes('new')) return true;
+        const style = window.getComputedStyle(el);
+        if (style.pointerEvents === 'none' || style.opacity === '0') return true;
+        return false;
+      };
+
+      // Try each selector
       for (const selector of selectors) {
         const elements = Array.from(document.querySelectorAll(selector));
+        
         for (const el of elements) {
           const cellDay = normalizeCellDay(el);
+          
+          // Found matching day
           if (!Number.isNaN(cellDay) && cellDay === targetDay) {
-            el.click();
-            return true;
+            // Check if it's disabled
+            if (isElementDisabled(el)) {
+              continue; // Try next element with same day (might be multiple)
+            }
+            
+            // Try to click it
+            try {
+              // Scroll into view first
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              
+              // Wait a bit for scroll
+              setTimeout(() => {}, 300);
+              
+              // Click
+              el.click();
+              
+              // Also dispatch events for robustness
+              el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+              el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+              el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              
+              return { 
+                success: true, 
+                day: cellDay, 
+                element: el.tagName,
+                selector: selector 
+              };
+            } catch (err) {
+              continue; // Try next element
+            }
           }
         }
       }
-      return false;
-    }, dayToSelect);
 
-    if (dateClicked) {
-      log(`  ✓ Selected preferred date: ${dayToSelect}`, 'green');
-      await wait(2000); // Wait for slots to reload
-      await takeScreenshot(page, '02_date_selected_preferred');
-      return true;
+      // If we get here, date wasn't found
+      return { 
+        success: false, 
+        reason: `Date ${targetDay} not found in calendar or all instances were disabled` 
+      };
+    }, dayToSelect.toString());
+
+    if (dateSelectionResult.success) {
+      log(`  ✅ Successfully selected date ${dateSelectionResult.day}`, 'green');
+      log(`  📍 Used selector: ${dateSelectionResult.selector}`, 'dim');
+      await wait(3000); // Wait longer for time slots to load
+      
+      // Verify time slots appeared
+      const timeSlotsAppeared = await page.evaluate(() => {
+        const slotSelectors = [
+          'button[class*="time"]:not([disabled])',
+          '.time-slot:not(.disabled)',
+          '[class*="slot"]:not([disabled])'
+        ];
+        
+        for (const sel of slotSelectors) {
+          const slots = document.querySelectorAll(sel);
+          if (slots.length > 0) return true;
+        }
+        return false;
+      });
+      
+      if (timeSlotsAppeared) {
+        log(`  ✅ Time slots loaded successfully`, 'green');
+        await takeScreenshot(page, '02_date_selected_preferred');
+        logStep(2, `Date ${dayToSelect} selected successfully`, 'success');
+        return true;
+      } else {
+        log(`  ⚠️ Date clicked but time slots didn't appear. Retrying...`, 'yellow');
+        await wait(2000);
+      }
     } else {
-      log(`  ⚠️ Preferred date ${dayToSelect} not found or unavailable. Falling back to default logic.`, 'yellow');
+      log(`  ❌ Failed to select date ${dayToSelect}: ${dateSelectionResult.reason}`, 'yellow');
+      log(`  ⚠️ Falling back to automatic date selection...`, 'yellow');
     }
   }
   
-  // If time slots are already visible, keep whatever date BrokerBay has selected by default.
+  // Fallback: Auto-select today or next available date
+  log(`  🔍 Auto-selecting best available date...`, 'dim');
+  
+  // Check if time slots are already visible (date already selected)
   const hasVisibleTimeSlots = await page.evaluate(() => {
     const slotSelectors = [
       'button[class*="time"]:not([disabled])',
@@ -835,145 +963,116 @@ async function selectDateStep(page, preferredDate = null) {
     ];
     
     for (const selector of slotSelectors) {
-      const el = document.querySelector(selector);
-      if (!el) continue;
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-        continue;
+      const slots = document.querySelectorAll(selector);
+      if (slots.length > 0) {
+        // Check if actually visible
+        for (const slot of slots) {
+          const style = window.getComputedStyle(slot);
+          if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+            return true;
+          }
+        }
       }
-      return true;
     }
-    
     return false;
   });
   
   if (hasVisibleTimeSlots) {
-    const existingSelection = await page.evaluate(() => {
+    const selectedDate = await page.evaluate(() => {
       const selectors = [
-        '.calendar-day.selected',
-        '.calendar-day.active',
-        'td.selected',
-        'td.active',
-        '.day.selected',
-        '.day.active',
-        '.bb-calendar__day--selected',
-        '.bb-calendar__day--active'
+        'td.selected', 'td.active',
+        '.day.selected', '.day.active',
+        '.calendar-day.selected', '.calendar-day.active',
+        '.bb-calendar__day--selected', '.bb-calendar__day--active'
       ];
-      for (const selector of selectors) {
-        const el = document.querySelector(selector);
-        if (el && el.textContent) {
-          return el.textContent.trim();
+      
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const text = (el.textContent || '').trim();
+          const dayMatch = text.match(/\b(\d{1,2})\b/);
+          return dayMatch ? dayMatch[1] : text;
         }
       }
       return null;
     });
     
-    if (existingSelection) {
-      log(`  ✓ Keeping current booking date: ${existingSelection}`, 'dim');
+    if (selectedDate) {
+      log(`  ✅ Date already selected: ${selectedDate}`, 'green');
     } else {
-      log(`  ✓ Keeping current booking date as shown on page`, 'dim');
+      log(`  ✅ Date already selected (current calendar date)`, 'green');
     }
-    
-    await takeScreenshot(page, '02_date_verified');
+    await takeScreenshot(page, '02_date_already_selected');
+    logStep(2, "Date verified (already selected)", 'success');
     return true;
   }
   
-  const existingSelection = await page.evaluate(() => {
+  // Try to click today's date or next available
+  const autoSelectResult = await page.evaluate(() => {
+    const now = new Date();
+    const today = now.getDate();
+    
+    // Selector priority for available dates
     const selectors = [
-      '.calendar-day.selected',
-      '.calendar-day.active',
-      'td.selected',
-      'td.active',
-      '.day.selected',
-      '.day.active'
-    ];
-    for (const selector of selectors) {
-      const el = document.querySelector(selector);
-      if (el) {
-        return el.textContent?.trim() || null;
-      }
-    }
-    return null;
-  });
-  
-  if (existingSelection) {
-    log(`  ✓ Keeping current booking date: ${existingSelection}`, 'dim');
-    await takeScreenshot(page, '02_date_verified');
-    return true;
-  }
-  
-  // Look for the current date indicator
-  const dateSelectors = [
-    'td.today:not(.disabled):not(.old)',
-    'td.day:not(.disabled):not(.old).today',
-    'button[class*="today"]:not([disabled])',
-    '.calendar-day.today:not(.disabled)'
-  ];
-  
-  let dateSelected = false;
-  
-  // Try to click today's date first
-  for (const selector of dateSelectors) {
-    const elements = await page.$$(selector);
-    if (elements.length > 0) {
-      log(`  Found today's date`, 'dim');
-      try {
-        await elements[0].click();
-        await wait(2000); // Wait for time slots to load
-        dateSelected = true;
-        log(`  ✓ Selected today's date`, 'dim');
-        break;
-      } catch (error) {
-        continue;
-      }
-    }
-  }
-  
-  // If today didn't work, try any available future date
-  if (!dateSelected) {
-    const availableDateSelectors = [
+      // Today specifically
+      'td.today:not(.disabled):not(.old)',
+      'td.day.today:not(.disabled)',
+      '.calendar-day.today:not(.disabled)',
+      // Any available date in current month
       'td.day:not(.disabled):not(.old):not(.new)',
-      'button[class*="date"]:not([disabled])',
+      'td.available:not(.disabled)',
       '.calendar-day:not(.disabled)',
-      'td.available'
+      // Fallback to any clickable date
+      'td.day', '.calendar-day', 'button[class*="day"]'
     ];
     
-    for (const selector of availableDateSelectors) {
-      const elements = await page.$$(selector);
+    for (const selector of selectors) {
+      const elements = Array.from(document.querySelectorAll(selector));
+      
       if (elements.length > 0) {
-        log(`  Found ${elements.length} available dates`, 'dim');
-        
-        // Try clicking the first few dates
-        for (let i = 0; i < Math.min(elements.length, 3); i++) {
+        // Try to find and click the first non-disabled element
+        for (const el of elements) {
+          // Skip if disabled
+          if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+          const classes = el.className || '';
+          if (classes.includes('disabled')) continue;
+          
+          // Try to click
           try {
-            await elements[i].click();
-            await wait(2000);
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.click();
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
             
-            // Check if time slots appeared
-            const timeSlotsExist = await page.$('.time-slot, [class*="time"], button[class*="slot"]');
-            if (timeSlotsExist) {
-              dateSelected = true;
-              log(`  ✓ Date selected successfully`, 'dim');
-              break;
-            }
-          } catch (error) {
+            // Extract day number for logging
+            const text = (el.textContent || '').trim();
+            const dayMatch = text.match(/\b(\d{1,2})\b/);
+            
+            return { 
+              success: true, 
+              day: dayMatch ? dayMatch[1] : 'unknown',
+              selector: selector 
+            };
+          } catch (err) {
             continue;
           }
         }
-        
-        if (dateSelected) break;
       }
     }
+    
+    return { success: false, reason: 'No clickable dates found' };
+  });
+  
+  if (autoSelectResult.success) {
+    log(`  ✅ Auto-selected date: ${autoSelectResult.day}`, 'green');
+    await wait(3000);
+    await takeScreenshot(page, '02_date_auto_selected');
+    logStep(2, `Date ${autoSelectResult.day} selected automatically`, 'success');
+    return true;
   }
   
-  if (!dateSelected) {
-    throw new Error("Could not select a date - no available dates found");
-  }
-  
-  await takeScreenshot(page, '02_date_selected');
-  logStep(2, "Date selected successfully", 'success');
-  
-  return dateSelected;
+  // If nothing worked, take screenshot and throw error
+  await takeScreenshot(page, '02_date_selection_failed');
+  throw new Error(`Could not select any date. Reason: ${autoSelectResult.reason}. Check screenshot: 02_date_selection_failed*.png`);
 }
 
 // ==================== STEP 3: SELECT TIME AND DURATION ====================

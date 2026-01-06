@@ -675,6 +675,107 @@ app.get('/api/scheduled-properties', (req, res) => {
   }
 });
 
+app.get('/api/auto-booking-queue', (req, res) => {
+  const db = getDatabase();
+
+  try {
+    const tables = db
+      .prepare(`
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name IN ('processed_showing_requests', 'properties')
+      `)
+      .all();
+
+    const names = new Set(tables.map((t) => t.name));
+    if (!names.has('processed_showing_requests') || !names.has('properties')) {
+      return res.json({
+        success: true,
+        data: {
+          pending: [],
+          processing: [],
+          completed: [],
+          failed: []
+        }
+      });
+    }
+
+    const pending = db
+      .prepare(
+        `
+        SELECT psr.*, p.address
+        FROM processed_showing_requests psr
+        LEFT JOIN properties p ON p.property_id = psr.property_id
+        WHERE psr.auto_booked = 0
+        ORDER BY psr.created_at
+      `
+      )
+      .all();
+
+    const processing = db
+      .prepare(
+        `
+        SELECT psr.*, p.address
+        FROM processed_showing_requests psr
+        LEFT JOIN properties p ON p.property_id = psr.property_id
+        WHERE psr.auto_booked = 1 AND psr.booking_status IS NULL
+        ORDER BY psr.processed_at DESC
+        LIMIT 5
+      `
+      )
+      .all();
+
+    const completed = db
+      .prepare(
+        `
+        SELECT psr.*, p.address
+        FROM processed_showing_requests psr
+        LEFT JOIN properties p ON p.property_id = psr.property_id
+        WHERE psr.booking_status = 'completed'
+        ORDER BY psr.processed_at DESC
+        LIMIT 10
+      `
+      )
+      .all();
+
+    const failed = db
+      .prepare(
+        `
+        SELECT psr.*, p.address
+        FROM processed_showing_requests psr
+        LEFT JOIN properties p ON p.property_id = psr.property_id
+        WHERE psr.booking_status LIKE 'failed%'
+        ORDER BY psr.processed_at DESC
+        LIMIT 10
+      `
+      )
+      .all();
+
+    res.json({
+      success: true,
+      data: {
+        pending,
+        processing,
+        completed,
+        failed
+      },
+      stats: {
+        pendingCount: pending.length,
+        processingCount: processing.length,
+        completedCount: completed.length,
+        failedCount: failed.length
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching auto-booking queue:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  } finally {
+    db.close();
+  }
+});
+
 // Export bookings to CSV
 app.get('/api/export/csv', (req, res) => {
   const db = getDatabase();

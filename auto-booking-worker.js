@@ -37,6 +37,9 @@ function log(message, color = 'reset') {
 
 const bookingQueue = [];
 let isProcessing = false;
+const failedAddressFetches = new Map();
+const MAX_RETRY_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 60000;
 
 function ensureTables() {
   db.exec(`
@@ -164,18 +167,19 @@ function extractAddress(payload) {
   return null;
 }
 
-async function fetchAndSavePropertyAddress(propertyId) {
+async function fetchAndSavePropertyAddress(propertyId, retryCount = 0) {
   const existing = db.prepare("SELECT address FROM properties WHERE property_id = ?").get(propertyId);
   
   if (existing && existing.address) {
     log(`  ✓ Address already cached: ${existing.address}`, 'cyan');
+    failedAddressFetches.delete(propertyId);
     return existing.address;
   }
 
   const url = `https://property-api-6nkd.onrender.com/api/properties/${encodeURIComponent(propertyId)}`;
   
   try {
-    const res = await axios.get(url, { timeout: 15000 });
+    const res = await axios.get(url, { timeout: 20000 });
     const rawAddress = extractAddress(res.data);
     
     if (!rawAddress) {
@@ -193,9 +197,28 @@ async function fetchAndSavePropertyAddress(propertyId) {
     upsertStmt.run(propertyId, searchAddress || rawAddress);
     
     log(`  ✓ Fetched address: ${searchAddress || rawAddress}`, 'green');
+    failedAddressFetches.delete(propertyId);
     return searchAddress || rawAddress;
   } catch (err) {
-    log(`  ❌ Failed to fetch address for ${propertyId}: ${err.message}`, 'red');
+    log(`  ❌ Failed to fetch address for ${propertyId} (attempt ${retryCount + 1}/${MAX_RETRY_ATTEMPTS}): ${err.message}`, 'red');
+    
+    if (retryCount < MAX_RETRY_ATTEMPTS - 1) {
+      failedAddressFetches.set(propertyId, {
+        attempts: retryCount + 1,
+        lastAttempt: Date.now(),
+        error: err.message
+      });
+      log(`  🔄 Will retry fetching address for ${propertyId} later...`, 'yellow');
+    } else {
+      log(`  ⚠️  Max retry attempts reached for ${propertyId}. Marking as failed.`, 'yellow');
+      failedAddressFetches.set(propertyId, {
+        attempts: retryCount + 1,
+        lastAttempt: Date.now(),
+        error: err.message,
+        maxRetriesReached: true
+      });
+    }
+    
     return null;
   }
 }
@@ -267,33 +290,77 @@ async function processBookingQueue() {
     log(`   Queue remaining: ${bookingQueue.length}`, 'cyan');
     log('='.repeat(70), 'bright');
 
-    const address = await fetchAndSavePropertyAddress(booking.propertyId);
-    
-    if (!address) {
-      log(`  ⚠️  Skipping booking - no address available`, 'yellow');
+    try {
+      const failedInfo = failedAddressFetches.get(booking.propertyId);
+      const retryCount = failedInfo?.attempts || 0;
+      
+      const address = await fetchAndSavePropertyAddress(booking.propertyId, retryCount);
+      
+      if (!address) {
+        const shouldRetry = retryCount < MAX_RETRY_ATTEMPTS - 1;
+        
+        if (shouldRetry) {
+          log(`  🔄 Re-queuing ${booking.propertyId} for retry (attempt ${retryCount + 1}/${MAX_RETRY_ATTEMPTS})`, 'yellow');
+          bookingQueue.push(booking);
+          
+          db.prepare(`
+            UPDATE processed_showing_requests 
+            SET booking_status = 'retry_pending'
+            WHERE id = ?
+          `).run(booking.requestId);
+        } else {
+          log(`  ⚠️  Skipping booking - max retry attempts reached for ${booking.propertyId}`, 'yellow');
+          
+          db.prepare(`
+            UPDATE processed_showing_requests 
+            SET auto_booked = 1, booking_status = 'failed_no_address'
+            WHERE id = ?
+          `).run(booking.requestId);
+        }
+        
+        continue;
+      }
+
+      log(`  🚀 Starting auto-booking for: ${address}`, 'blue');
+      const result = await runAutoBooking(address, "8:00 PM", null);
+
+      if (result.success) {
+        db.prepare(`
+          UPDATE processed_showing_requests 
+          SET auto_booked = 1, booking_status = 'completed'
+          WHERE id = ?
+        `).run(booking.requestId);
+        log(`  ✅ Booking completed for ${booking.propertyId}`, 'green');
+      } else {
+        db.prepare(`
+          UPDATE processed_showing_requests 
+          SET auto_booked = 1, booking_status = 'failed_booking_error'
+          WHERE id = ?
+        `).run(booking.requestId);
+        log(`  ❌ Booking failed for ${booking.propertyId}`, 'red');
+      }
+
+    } catch (error) {
+      log(`  ❌ Unexpected error processing ${booking.propertyId}: ${error.message}`, 'red');
       
       db.prepare(`
         UPDATE processed_showing_requests 
-        SET auto_booked = 1, booking_status = 'failed_no_address'
+        SET auto_booked = 1, booking_status = 'failed_unexpected_error'
         WHERE id = ?
       `).run(booking.requestId);
-      
-      continue;
     }
-
-    const result = await runAutoBooking(address, "8:00 PM", null);
-
-    db.prepare(`
-      UPDATE processed_showing_requests 
-      SET auto_booked = 1, booking_status = ?
-      WHERE id = ?
-    `).run(result.success ? 'completed' : 'failed', booking.requestId);
 
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
 
   isProcessing = false;
-  log(`\n✅ Queue processed. Waiting for new records...\n`, 'green');
+  
+  const failedCount = Array.from(failedAddressFetches.values()).filter(f => !f.maxRetriesReached).length;
+  if (failedCount > 0) {
+    log(`\n⚠️  Queue processed. ${failedCount} item(s) pending retry. Waiting for new records...\n`, 'yellow');
+  } else {
+    log(`\n✅ Queue processed. Waiting for new records...\n`, 'green');
+  }
 }
 
 function queueBooking(request) {
@@ -317,6 +384,35 @@ function queueBooking(request) {
   processBookingQueue();
 }
 
+async function retryFailedAddressFetches() {
+  const now = Date.now();
+  const toRetry = [];
+  
+  for (const [propertyId, info] of failedAddressFetches.entries()) {
+    if (!info.maxRetriesReached && (now - info.lastAttempt) >= RETRY_DELAY_MS) {
+      toRetry.push(propertyId);
+    }
+  }
+  
+  if (toRetry.length > 0) {
+    log(`\n🔄 Retrying ${toRetry.length} failed address fetch(es)...`, 'yellow');
+    
+    for (const propertyId of toRetry) {
+      const pending = db.prepare(`
+        SELECT * FROM processed_showing_requests 
+        WHERE property_id = ? AND booking_status = 'retry_pending'
+        ORDER BY created_at
+        LIMIT 1
+      `).get(propertyId);
+      
+      if (pending) {
+        log(`  🔄 Re-queuing ${propertyId} for retry`, 'cyan');
+        queueBooking(pending);
+      }
+    }
+  }
+}
+
 function startRealtimeListener() {
   log('', 'reset');
   log('╔═══════════════════════════════════════════════════════════╗', 'cyan');
@@ -326,6 +422,7 @@ function startRealtimeListener() {
   log('🎯 Listening for new showing_requests in Supabase...', 'blue');
   log('⏰ Default booking time: 8:00 PM', 'blue');
   log('📅 Default booking date: Current day', 'blue');
+  log('🔄 Retry failed address fetches: Every 60 seconds', 'blue');
   log('', 'reset');
 
   const channel = supabase
@@ -346,14 +443,28 @@ function startRealtimeListener() {
         queueBooking(payload.new);
       }
     )
-    .subscribe((status) => {
+    .subscribe((status, err) => {
       if (status === 'SUBSCRIBED') {
         log('✅ Successfully subscribed to showing_requests changes', 'green');
         log('   Waiting for INSERT events...\n', 'cyan');
       } else if (status === 'CHANNEL_ERROR') {
         log('❌ Error subscribing to Supabase Realtime', 'red');
+        if (err) {
+          log(`   Error details: ${err.message || JSON.stringify(err)}`, 'red');
+        }
+        log('   Check: 1) Realtime enabled? 2) Publication exists? 3) Correct credentials?', 'yellow');
+      } else if (status === 'TIMED_OUT') {
+        log('⏱️  Subscription timed out. Retrying...', 'yellow');
+      } else if (status === 'CLOSED') {
+        log('🔌 Subscription closed. Attempting to reconnect...', 'yellow');
+      } else {
+        log(`📡 Subscription status: ${status}`, 'cyan');
       }
     });
+  
+  setInterval(() => {
+    retryFailedAddressFetches();
+  }, RETRY_DELAY_MS);
 
   return channel;
 }

@@ -469,7 +469,33 @@
 
         <div class="card scheduled-card">
             <div class="scheduled-header">
-                <h3>Scheduled properties</h3>
+                <h3>Auto-Booking Queue Status</h3>
+                <span class="scheduled-subtitle" id="queueSubtitle">Loading queue status...</span>
+            </div>
+            <div class="meta-row" style="margin-top: 15px; margin-bottom: 20px;">
+                <div>
+                    <span>Pending</span>
+                    <strong id="queuePending" style="color: #f59e0b;">0</strong>
+                </div>
+                <div>
+                    <span>Processing</span>
+                    <strong id="queueProcessing" style="color: #3b82f6;">0</strong>
+                </div>
+                <div>
+                    <span>Completed</span>
+                    <strong id="queueCompleted" style="color: #10b981;">0</strong>
+                </div>
+                <div>
+                    <span>Failed</span>
+                    <strong id="queueFailed" style="color: #ef4444;">0</strong>
+                </div>
+            </div>
+            <div id="queueList" class="scheduled-list"></div>
+        </div>
+
+        <div class="card scheduled-card">
+            <div class="scheduled-header">
+                <h3>Scheduled properties (For Manual Booking)</h3>
                 <span class="scheduled-subtitle" id="scheduledSubtitle">No scheduled properties yet.</span>
             </div>
             <div id="scheduledList" class="scheduled-list"></div>
@@ -619,6 +645,12 @@
         const statusJobId = document.getElementById('statusJobId');
         const scheduledList = document.getElementById('scheduledList');
         const scheduledSubtitle = document.getElementById('scheduledSubtitle');
+        const queueSubtitle = document.getElementById('queueSubtitle');
+        const queueList = document.getElementById('queueList');
+        const queuePending = document.getElementById('queuePending');
+        const queueProcessing = document.getElementById('queueProcessing');
+        const queueCompleted = document.getElementById('queueCompleted');
+        const queueFailed = document.getElementById('queueFailed');
 
         let eventSource = null;
         let activeJobId = null;
@@ -773,6 +805,98 @@
                 renderScheduledProperties(data.data || []);
             } catch {
                 renderScheduledProperties([]);
+            }
+        }
+
+        function renderAutoBookingQueue(queueData, stats) {
+            queueList.innerHTML = '';
+            
+            queuePending.textContent = stats.pendingCount;
+            queueProcessing.textContent = stats.processingCount;
+            queueCompleted.textContent = stats.completedCount;
+            queueFailed.textContent = stats.failedCount;
+
+            const totalItems = stats.pendingCount + stats.completedCount + stats.failedCount;
+            
+            if (totalItems === 0) {
+                queueSubtitle.textContent = 'No auto-booking activity yet. Worker is listening for new showing requests...';
+                return;
+            }
+
+            if (stats.pendingCount > 0) {
+                queueSubtitle.textContent = `🚀 ${stats.pendingCount} booking(s) queued for processing. Auto-booking @ 8:00 PM today.`;
+            } else if (stats.processingCount > 0) {
+                queueSubtitle.textContent = `⚙️ Processing booking(s)...`;
+            } else {
+                queueSubtitle.textContent = `✅ All bookings processed. Waiting for new showing requests...`;
+            }
+
+            const allItems = [
+                ...queueData.pending.map(item => ({ ...item, queueStatus: 'pending' })),
+                ...queueData.processing.map(item => ({ ...item, queueStatus: 'processing' })),
+                ...queueData.completed.slice(0, 3).map(item => ({ ...item, queueStatus: 'completed' })),
+                ...queueData.failed.slice(0, 3).map(item => ({ ...item, queueStatus: 'failed' }))
+            ];
+
+            allItems.forEach((item) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'scheduled-item';
+                
+                const statusEmoji = {
+                    pending: '⏳',
+                    processing: '⚙️',
+                    completed: '✅',
+                    failed: '❌'
+                };
+
+                const statusColors = {
+                    pending: 'rgba(245, 158, 11, 0.12)',
+                    processing: 'rgba(59, 130, 246, 0.12)',
+                    completed: 'rgba(16, 185, 129, 0.12)',
+                    failed: 'rgba(239, 68, 68, 0.12)'
+                };
+
+                const statusTextColors = {
+                    pending: '#d97706',
+                    processing: '#2563eb',
+                    completed: '#047857',
+                    failed: '#b91c1c'
+                };
+
+                btn.style.background = statusColors[item.queueStatus];
+                btn.style.color = statusTextColors[item.queueStatus];
+                
+                const label = item.address || item.property_id;
+                btn.textContent = `${statusEmoji[item.queueStatus]} ${label}`;
+                
+                if (item.queueStatus === 'pending' || item.queueStatus === 'processing') {
+                    btn.style.cursor = 'default';
+                } else {
+                    btn.addEventListener('click', () => {
+                        propertyInput.value = label;
+                        propertyInput.focus();
+                    });
+                }
+                
+                queueList.appendChild(btn);
+            });
+        }
+
+        async function fetchAutoBookingQueue() {
+            try {
+                const res = await fetch('/api/auto-booking-queue');
+                const data = await res.json();
+                if (!data.success) {
+                    renderAutoBookingQueue({ pending: [], processing: [], completed: [], failed: [] }, 
+                                          { pendingCount: 0, processingCount: 0, completedCount: 0, failedCount: 0 });
+                    return;
+                }
+                renderAutoBookingQueue(data.data, data.stats);
+            } catch (err) {
+                console.error('Error fetching auto-booking queue:', err);
+                renderAutoBookingQueue({ pending: [], processing: [], completed: [], failed: [] }, 
+                                      { pendingCount: 0, processingCount: 0, completedCount: 0, failedCount: 0 });
             }
         }
 
@@ -942,6 +1066,9 @@
         initializePage();
         fetchLatestJob();
         fetchScheduledProperties();
+        fetchAutoBookingQueue();
+        
+        setInterval(fetchAutoBookingQueue, 5000);
     </script>
 </body>
 </html>

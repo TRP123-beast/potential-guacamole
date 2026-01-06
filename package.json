@@ -9,6 +9,7 @@
     "server": "node src/index.js",
     "dashboard": "node dashboard-server.js",
     "scheduler": "node scheduler.js",
+    "worker": "node auto-booking-worker.js",
     "fetch:showings": "node fetch-showing-requests.js",
     "fetch:addresses": "node fetch-property-addresses.js",
     "show:tables": "node show-schedules-and-properties.js",

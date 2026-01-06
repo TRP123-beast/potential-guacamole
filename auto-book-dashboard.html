@@ -141,25 +141,59 @@
             margin-bottom: 8px;
         }
 
-        input[type="text"] {
+        input[type="text"],
+        input[type="number"] {
             width: 100%;
             padding: 14px 18px;
             border: 2px solid #e5e7eb;
             border-radius: 12px;
             font-size: 1em;
-            transition: border-color 0.3s ease;
+            transition: all 0.3s ease;
         }
 
-        input[type="text"]:focus {
+        input[type="text"]:focus,
+        input[type="number"]:focus {
             outline: none;
             border-color: #6366f1;
             box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
+        }
+
+        input[type="number"] {
+            -moz-appearance: textfield;
+        }
+
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        /* Validation states */
+        input.valid {
+            border-color: #10b981 !important;
+        }
+
+        input.invalid {
+            border-color: #ef4444 !important;
         }
 
         .helper-text {
             font-size: 0.85em;
             color: #6b7280;
             margin-top: 6px;
+            line-height: 1.4;
+        }
+
+        .helper-text code {
+            background: rgba(99, 102, 241, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .helper-text strong {
+            color: #4338ca;
         }
 
         .toggle {
@@ -480,8 +514,13 @@
                     </div>
                     <div class="input-group">
                         <label for="dateInput">Preferred date (optional)</label>
-                        <input type="text" id="dateInput" placeholder="15" autocomplete="off">
-                        <div class="helper-text">Enter the day of the month (e.g. "15"). If left blank, it defaults to today or the earliest available date.</div>
+                        <input type="number" id="dateInput" placeholder="25" autocomplete="off" min="1" max="31">
+                        <div class="helper-text" id="dateHelperText">
+                            Enter day of month (1-31) within <strong>current month only</strong>. 
+                            Date must be <strong>today or later</strong> (Today is <span id="currentDayDisplay"></span>).
+                            <br>Examples: <code>18</code>, <code>25</code>, <code>31</code>
+                        </div>
+                        <div class="helper-text" id="dateWarning" style="display:none; color: #d97706; font-weight: 600; margin-top: 8px;"></div>
                     </div>
                     <div class="toggle">
                         <input type="checkbox" id="showBrowser">
@@ -584,6 +623,13 @@
         let eventSource = null;
         let activeJobId = null;
 
+        // Date validation helpers
+        const currentDate = new Date();
+        const currentDay = currentDate.getDate();
+        const currentMonth = currentDate.getMonth();
+        const currentYear = currentDate.getFullYear();
+        const daysInCurrentMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+
         function setAlert(message, type = 'error') {
             formAlert.textContent = message;
             formAlert.className = `alert show ${type}`;
@@ -592,6 +638,52 @@
         function clearAlert() {
             formAlert.textContent = '';
             formAlert.className = 'alert';
+        }
+
+        function validateDateInput(value) {
+            if (!value || value.trim() === '') {
+                return { valid: true, message: '' }; // Optional field
+            }
+
+            const day = parseInt(value, 10);
+
+            // Check if it's a valid number
+            if (isNaN(day)) {
+                return { valid: false, message: 'Please enter a valid day number (e.g., 18, 25)' };
+            }
+
+            // Check if it's within valid range
+            if (day < 1 || day > 31) {
+                return { valid: false, message: 'Day must be between 1 and 31' };
+            }
+
+            // Check if it's within current month
+            if (day > daysInCurrentMonth) {
+                return { 
+                    valid: false, 
+                    message: `Current month only has ${daysInCurrentMonth} days. Please enter 1-${daysInCurrentMonth}` 
+                };
+            }
+
+            // Check if it's not in the past
+            if (day < currentDay) {
+                return { 
+                    valid: false, 
+                    message: `Date ${day} is in the past. Today is day ${currentDay}. Please select ${currentDay} or later.` 
+                };
+            }
+
+            return { valid: true, message: '' };
+        }
+
+        function showDateWarning(message) {
+            const warningEl = document.getElementById('dateWarning');
+            if (message) {
+                warningEl.textContent = '⚠️ ' + message;
+                warningEl.style.display = 'block';
+            } else {
+                warningEl.style.display = 'none';
+            }
         }
 
         function setFormDisabled(disabled) {
@@ -738,19 +830,38 @@
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
             clearAlert();
+            showDateWarning('');
+            
             const rawProperty = propertyInput.value.trim();
             const property = normalizePropertyAddress(rawProperty);
             const preferredTime = timeInput.value.trim();
             const preferredDate = dateInput.value.trim();
+            
             if (!property) {
                 setAlert('Enter a property address first.');
                 return;
             }
+            
+            // Validate date input if provided
+            if (preferredDate) {
+                const dateValidation = validateDateInput(preferredDate);
+                if (!dateValidation.valid) {
+                    setAlert(dateValidation.message);
+                    showDateWarning(dateValidation.message);
+                    return;
+                }
+            }
+            
             // Update the input so the user sees the normalized value that will be used for search
             propertyInput.value = property;
             setFormDisabled(true);
             clearLogOutput();
-            appendLog({ level: 'info', timestamp: new Date().toISOString(), message: `Queued request for "${property}"...` });
+            
+            if (preferredDate) {
+                appendLog({ level: 'info', timestamp: new Date().toISOString(), message: `Queued request for "${property}" on day ${preferredDate}...` });
+            } else {
+                appendLog({ level: 'info', timestamp: new Date().toISOString(), message: `Queued request for "${property}"...` });
+            }
 
             try {
                 const response = await fetch('/api/auto-book', {
@@ -781,6 +892,54 @@
             clearLogOutput();
         });
 
+        // Real-time date validation
+        dateInput.addEventListener('input', () => {
+            const value = dateInput.value.trim();
+            if (value) {
+                const validation = validateDateInput(value);
+                if (!validation.valid) {
+                    showDateWarning(validation.message);
+                    dateInput.style.borderColor = '#ef4444';
+                } else {
+                    showDateWarning('');
+                    dateInput.style.borderColor = '#10b981';
+                }
+            } else {
+                showDateWarning('');
+                dateInput.style.borderColor = '';
+            }
+        });
+
+        // Clear validation styling on blur if empty
+        dateInput.addEventListener('blur', () => {
+            if (!dateInput.value.trim()) {
+                dateInput.style.borderColor = '';
+            }
+        });
+
+        // Initialize page
+        function initializePage() {
+            // Display current day
+            const currentDayDisplay = document.getElementById('currentDayDisplay');
+            if (currentDayDisplay) {
+                const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                                   'July', 'August', 'September', 'October', 'November', 'December'];
+                currentDayDisplay.textContent = `${monthNames[currentMonth]} ${currentDay}, ${currentYear}`;
+            }
+
+            // Update date input max attribute with days in current month
+            dateInput.setAttribute('max', daysInCurrentMonth);
+            
+            // Set min attribute to current day
+            dateInput.setAttribute('min', currentDay);
+            
+            // Update placeholder to show a valid example
+            const exampleDay = Math.min(currentDay + 2, daysInCurrentMonth);
+            dateInput.setAttribute('placeholder', exampleDay.toString());
+        }
+
+        // Initialize and fetch data
+        initializePage();
         fetchLatestJob();
         fetchScheduledProperties();
     </script>

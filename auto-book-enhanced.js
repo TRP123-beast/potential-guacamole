@@ -518,6 +518,48 @@ async function selectPropertyFromResults(page, searchQuery) {
 
     // Re-check after forced navigation attempt (longer timeout).
     listingViewDetected = await detectListingView(CONFIG.navigationTimeout + 20000);
+
+    // Extra hard fallback: extract listing URL and force navigation via page.goto
+    if (!listingViewDetected) {
+      try {
+        const forcedUrl = await page.evaluate(() => {
+          const hrefFromLink = () => {
+            const link = document.querySelector("a[href*='/listing/']");
+            if (link && link.getAttribute("href")) return link.getAttribute("href");
+            return null;
+          };
+          const hrefFromRow = () => {
+            const row = document.querySelector("table tbody tr");
+            if (!row) return null;
+            const link =
+              row.querySelector("a[href*='/listing/']") ||
+              row.querySelector("a[data-href*='listing']") ||
+              row.querySelector("[data-href*='listing']");
+            if (link && link.getAttribute("href")) return link.getAttribute("href");
+            const id =
+              row.getAttribute("data-id") ||
+              row.getAttribute("data-listing-id") ||
+              row.getAttribute("listing-id") ||
+              (row.dataset && (row.dataset.id || row.dataset.listingId));
+            if (id) return `#/listing/${id}/view`;
+            return null;
+          };
+
+          const href = hrefFromLink() || hrefFromRow();
+          if (!href) return null;
+          if (href.startsWith("http")) return href;
+          return `https://edge.brokerbay.com/${href.replace(/^#?/, "")}`;
+        });
+
+        if (forcedUrl) {
+          log(`  ⚠️ Forcing navigation via page.goto to ${forcedUrl}`, "yellow");
+          await page.goto(forcedUrl, { waitUntil: "networkidle2", timeout: CONFIG.navigationTimeout + 20000 });
+          listingViewDetected = listingUrlPattern.test(page.url());
+        }
+      } catch (e) {
+        log(`  ⚠️ Forced navigation via page.goto failed: ${e.message}`, "yellow");
+      }
+    }
   }
 
   if (!listingViewDetected && !listingUrlPattern.test(page.url())) {

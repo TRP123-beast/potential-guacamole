@@ -6,7 +6,9 @@ import { createClient } from "@supabase/supabase-js";
 configDotenv();
 
 const supabaseUrl = process.env.SUPABASE_PROJECT_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+const supabaseKey = supabaseServiceKey || supabaseAnonKey;
 
 console.log('\n╔═══════════════════════════════════════════════════════════╗');
 console.log('║         Supabase Realtime Connection Test               ║');
@@ -14,12 +16,17 @@ console.log('╚═════════════════════�
 
 if (!supabaseUrl || !supabaseKey) {
   console.error("❌ Missing Supabase credentials in .env file");
-  console.error("   Required: SUPABASE_PROJECT_URL and SUPABASE_ANON_KEY\n");
+  console.error("   Required: SUPABASE_PROJECT_URL and SUPABASE_SERVICE_ROLE_KEY (or ANON as fallback)\n");
   process.exit(1);
 }
 
 console.log(`📡 Supabase URL: ${supabaseUrl}`);
-console.log(`🔑 Using key: ${supabaseKey.substring(0, 20)}...\n`);
+if (supabaseServiceKey) {
+  console.log(`🔑 Using SERVICE ROLE key: ${supabaseKey.substring(0, 20)}...`);
+} else {
+  console.log(`⚠️ Using ANON key (set SUPABASE_SERVICE_ROLE_KEY for Realtime/RLS): ${supabaseKey.substring(0, 20)}...`);
+}
+console.log();
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 

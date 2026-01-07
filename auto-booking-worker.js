@@ -9,12 +9,21 @@ import axios from "axios";
 configDotenv();
 
 const supabaseUrl = process.env.SUPABASE_PROJECT_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+
+const supabaseKey = supabaseServiceKey || supabaseAnonKey;
 
 if (!supabaseUrl || !supabaseKey) {
   console.error("❌ Missing Supabase credentials.");
-  console.error("Set SUPABASE_PROJECT_URL and SUPABASE_ANON_KEY in .env");
+  console.error("Set SUPABASE_PROJECT_URL and SUPABASE_SERVICE_ROLE_KEY in environment (anon key as fallback).");
   process.exit(1);
+}
+
+if (supabaseServiceKey) {
+  console.log("🔑 Using Supabase SERVICE ROLE key for Realtime subscriptions.");
+} else {
+  console.log("⚠️ No SUPABASE_SERVICE_ROLE_KEY set. Falling back to ANON key (may fail with Realtime/RLS).");
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);

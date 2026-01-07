@@ -454,6 +454,7 @@ async function selectPropertyFromResults(page, searchQuery) {
           return true;
         };
 
+        // 1) Direct link inside the row
         const link =
           row.querySelector("a[href*='/listing/']") ||
           row.querySelector("a[href*='listing']") ||
@@ -461,9 +462,14 @@ async function selectPropertyFromResults(page, searchQuery) {
         if (link && link.getAttribute("href")) {
           const href = link.getAttribute("href");
           clickEl(link);
+          // force navigation just in case click is blocked
+          window.location.href = href.startsWith("http")
+            ? href
+            : `https://edge.brokerbay.com/${href.replace(/^#?/, "")}`;
           return { type: "link", href };
         }
 
+        // 2) Use data-id to build URL
         const id =
           row.getAttribute("data-id") ||
           row.getAttribute("data-listing-id") ||
@@ -475,6 +481,18 @@ async function selectPropertyFromResults(page, searchQuery) {
           return { type: "id", href };
         }
 
+        // 3) Try first anchor anywhere in row
+        const genericAnchor = row.querySelector("a[href]");
+        if (genericAnchor) {
+          const href = genericAnchor.getAttribute("href");
+          clickEl(genericAnchor);
+          window.location.href = href.startsWith("http")
+            ? href
+            : `https://edge.brokerbay.com/${href.replace(/^#?/, "")}`;
+          return { type: "generic_anchor", href };
+        }
+
+        // 4) Fallback click on any button-ish element
         const button =
           row.querySelector("button, [role='button'], a") ||
           row.querySelector("td, div, span");
@@ -482,13 +500,11 @@ async function selectPropertyFromResults(page, searchQuery) {
           return { type: "button" };
         }
 
-        // As a last resort, try dblclick + Enter on the row
+        // 5) Last resort: dblclick + Enter on the row
         row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
         row.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
         row.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
         return { type: "dblclick" };
-
-        return null;
       }, targetRow);
 
       if (forcedNav) {
@@ -500,8 +516,8 @@ async function selectPropertyFromResults(page, searchQuery) {
       log(`  ⚠️ Forced navigation attempt failed: ${e.message}`, "yellow");
     }
 
-    // Re-check after forced navigation attempt (full timeout again).
-    listingViewDetected = await detectListingView(CONFIG.navigationTimeout);
+    // Re-check after forced navigation attempt (longer timeout).
+    listingViewDetected = await detectListingView(CONFIG.navigationTimeout + 20000);
   }
 
   if (!listingViewDetected && !listingUrlPattern.test(page.url())) {

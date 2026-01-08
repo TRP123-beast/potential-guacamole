@@ -2,6 +2,7 @@
 
 import { configDotenv } from "dotenv";
 import { createClient } from "@supabase/supabase-js";
+import WebSocket from "ws";
 import Database from "better-sqlite3";
 import { spawn } from "child_process";
 import axios from "axios";
@@ -26,7 +27,18 @@ if (supabaseServiceKey) {
   console.log("⚠️ No SUPABASE_SERVICE_ROLE_KEY set. Falling back to ANON key (may fail with Realtime/RLS).");
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Ensure WebSocket is available in Node
+if (!globalThis.WebSocket) {
+  globalThis.WebSocket = WebSocket;
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  realtime: {
+    heartbeatIntervalMs: 10000,
+    retryAttempts: 10,
+    retryInterval: 2000,
+  },
+});
 const db = new Database("src/data/data.db");
 
 const colors = {
@@ -434,6 +446,8 @@ function startRealtimeListener() {
   log('🔄 Retry failed address fetches: Every 60 seconds', 'blue');
   log('', 'reset');
 
+  let consecutiveTimeouts = 0;
+
   const channel = supabase
     .channel('showing_requests_changes')
     .on(
@@ -454,6 +468,7 @@ function startRealtimeListener() {
     )
     .subscribe((status, err) => {
       if (status === 'SUBSCRIBED') {
+        consecutiveTimeouts = 0;
         log('✅ Successfully subscribed to showing_requests changes', 'green');
         log('   Waiting for INSERT events...\n', 'cyan');
       } else if (status === 'CHANNEL_ERROR') {
@@ -464,6 +479,11 @@ function startRealtimeListener() {
         log('   Check: 1) Realtime enabled? 2) Publication exists? 3) Correct credentials?', 'yellow');
       } else if (status === 'TIMED_OUT') {
         log('⏱️  Subscription timed out. Retrying...', 'yellow');
+        consecutiveTimeouts += 1;
+        if (consecutiveTimeouts >= 3) {
+          log('❌ Too many consecutive timeouts. Exiting so the process restarts.', 'red');
+          process.exit(1);
+        }
       } else if (status === 'CLOSED') {
         log('🔌 Subscription closed. Attempting to reconnect...', 'yellow');
       } else {

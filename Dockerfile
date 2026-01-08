@@ -1,4 +1,4 @@
-FROM node:18-slim
+FROM node:20-slim
 
 # 1. Install dependencies required for Puppeteer (Chrome) + cron for scheduling
 RUN apt-get update && apt-get install -y \

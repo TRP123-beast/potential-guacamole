@@ -195,6 +195,62 @@ app.post("/api/auto-book", (req, res) => {
   setImmediate(() => startAutoBookJob(job));
 });
 
+// Check if a property exists on BrokerBay (headless Puppeteer, no UI)
+app.post("/api/property-exists", (req, res) => {
+  const { property } = req.body || {};
+  if (!property || property.trim().length < 3) {
+    return res.status(400).json({
+      success: false,
+      error: "Please provide a property name/address (min 3 characters).",
+    });
+  }
+
+  const child = spawn("node", ["check-property-exists.js", property.trim()], {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      HEADLESS: "true",
+    },
+  });
+
+  let output = "";
+  let errorOutput = "";
+  let exists = null;
+
+  child.stdout.on("data", (data) => {
+    const text = data.toString();
+    output += text;
+    const match = text.match(/RESULT:\s*(\{.*\})/);
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[1]);
+        exists = parsed.exists === true;
+      } catch {
+        // ignore parse errors
+      }
+    }
+  });
+
+  child.stderr.on("data", (data) => {
+    errorOutput += data.toString();
+  });
+
+  child.on("close", (code) => {
+    if (code === 0 && exists !== null) {
+      return res.json({
+        success: true,
+        exists,
+        logs: output.trim().split("\n").filter(Boolean),
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      error: errorOutput || "Check failed",
+      logs: (output + errorOutput).trim().split("\n").filter(Boolean),
+    });
+  });
+});
+
 app.get("/api/auto-book", (req, res) => {
   const jobs = Array.from(autoBookJobs.values())
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))

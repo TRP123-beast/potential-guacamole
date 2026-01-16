@@ -985,6 +985,7 @@ app.listen(PORT, () => {
   console.log('  DELETE /api/bookings/:id      - Delete booking');
   console.log('  GET    /api/export/csv        - Export to CSV');
   console.log('  GET    /api/export/json       - Export to JSON');
+  console.log('  POST    /api/property-exists  - Check if property exists(body: { property: "123 Main St" })');
   console.log('  GET    /api/health            - Health check');
   console.log('\n  Press Ctrl+C to stop\n');
 });

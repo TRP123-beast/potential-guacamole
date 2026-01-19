@@ -153,6 +153,44 @@ function normalizeAddressForSearch(address) {
   return truncated.trim();
 }
 
+function addBrokerBayHash(address) {
+  if (!address || typeof address !== "string") return address;
+  const trimmed = address.trim();
+  if (trimmed.includes("#")) return trimmed;
+
+  const patterns = [
+    // Unit / Suite with optional trailing words
+    /(.*?)(unit\s+[a-z0-9]+(?:\s+[\w-]+)*)$/i,
+    /(.*?)(suite\s+[a-z0-9]+(?:\s+[\w-]+)*)$/i,
+    // Floor / level keywords
+    /(.*?)(main floor|first floor|second floor|2nd floor|third floor|3rd floor|fourth floor|4th floor|upper level|lower level|upper|lower|main)$/i,
+  ];
+
+  for (const re of patterns) {
+    const m = trimmed.match(re);
+    if (m) {
+      const prefix = m[1].trim();
+      const suffix = m[2].trim();
+      return `${prefix} #${suffix}`;
+    }
+  }
+
+  // Trailing numeric token (unit number) if address already has a street number at start
+  const tokens = trimmed.split(/\s+/);
+  if (tokens.length > 2) {
+    const last = tokens[tokens.length - 1];
+    const first = tokens[0];
+    const lastIsNum = /^[0-9]+[a-z]?$/i.test(last);
+    const firstIsNum = /^[0-9]+/.test(first);
+    if (lastIsNum && firstIsNum) {
+      const prefix = tokens.slice(0, -1).join(" ");
+      return `${prefix} #${last}`;
+    }
+  }
+
+  return trimmed;
+}
+
 function extractAddress(payload) {
   if (!payload) return null;
   if (typeof payload === "string") return payload;
@@ -208,6 +246,7 @@ async function fetchAndSavePropertyAddress(propertyId, retryCount = 0) {
     }
 
     const searchAddress = normalizeAddressForSearch(rawAddress);
+    const hashedAddress = addBrokerBayHash(searchAddress || rawAddress);
     
     const upsertStmt = db.prepare(`
       INSERT INTO properties (property_id, address)
@@ -215,11 +254,14 @@ async function fetchAndSavePropertyAddress(propertyId, retryCount = 0) {
       ON CONFLICT(property_id) DO UPDATE SET address = excluded.address
     `);
     
-    upsertStmt.run(propertyId, searchAddress || rawAddress);
+    upsertStmt.run(propertyId, hashedAddress);
     
-    log(`  ✓ Fetched address: ${searchAddress || rawAddress}`, 'green');
+    if (hashedAddress !== searchAddress) {
+      log(`  🔎 Adjusted for BrokerBay search: "${hashedAddress}" (from "${searchAddress}")`, 'blue');
+    }
+    log(`  ✓ Fetched address: ${hashedAddress}`, 'green');
     failedAddressFetches.delete(propertyId);
-    return searchAddress || rawAddress;
+    return hashedAddress;
   } catch (err) {
     log(`  ❌ Failed to fetch address for ${propertyId} (attempt ${retryCount + 1}/${MAX_RETRY_ATTEMPTS}): ${err.message}`, 'red');
     

@@ -43,18 +43,24 @@ const args = process.argv.slice(2);
 let propertyAddress = args[0];
 let preferredTimeArg = args[1] || process.env.PREFERRED_TIME || "";
 let preferredDateArg = args[2] || process.env.PREFERRED_DATE || "";
+let preferredDurationArg = args[3] || process.env.PREFERRED_DURATION || "";
 
 if (!propertyAddress) {
   console.error("\n❌ Error: Please provide a property address to search");
-  console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time] [preferred_date]");
-  console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM' '15'\n");
+  console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time] [preferred_date] [preferred_duration]");
+  console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM' '15' '45'\n");
   console.log("The script will:");
   console.log("  1. Search for the property on BrokerBay");
   console.log("  2. Select it from search results");
   console.log("  3. Click 'Book Showing' button");
-  console.log("  4. Complete the booking form");
+  console.log("  4. Complete the booking form (time + duration)");
   console.log("  5. Click 'AUTO-CONFIRM' to finalize\n");
   process.exit(1);
+}
+
+const parsedPreferredDuration = parseInt(preferredDurationArg, 10);
+if (!Number.isNaN(parsedPreferredDuration)) {
+  USER_PROFILE.preferredDuration = parsedPreferredDuration;
 }
 
 const BROKERBAY_DASHBOARD = "https://edge.brokerbay.com/#/listing/list/brokerage";
@@ -315,6 +321,7 @@ async function selectPropertyFromResults(page, searchQuery) {
   ];
 
   let targetRow = null;
+  let targetRowInfo = null;
 
   // Find the best matching row in the search results
   for (const selector of rowSelectors) {
@@ -325,12 +332,13 @@ async function selectPropertyFromResults(page, searchQuery) {
 
     // Filter out empty/invalid rows
     const validRows = [];
-    for (const row of rows) {
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
       try {
         const text = await page.evaluate(el => el.textContent || "", row);
         // Skip rows with very little content (likely headers or empty states)
         if (!text || text.trim().length < 30) continue;
-        validRows.push({ row, text });
+        validRows.push({ row, text, index: i });
       } catch {
         continue;
       }
@@ -344,10 +352,11 @@ async function selectPropertyFromResults(page, searchQuery) {
     log(`  ✓ Found ${validRows.length} valid listing rows`, "dim");
 
     // Try to find exact match
-    for (const { row, text } of validRows) {
+    for (const { row, text, index } of validRows) {
       const lower = text.toLowerCase();
       if (lower.includes(searchRoot)) {
         targetRow = row;
+        targetRowInfo = { selector, index, text };
         log("  ✓ Found matching row for property search", "green");
         break;
       }
@@ -356,13 +365,14 @@ async function selectPropertyFromResults(page, searchQuery) {
     // If we didn't find an exact match, fall back to the first valid row
     if (!targetRow && validRows.length) {
       targetRow = validRows[0].row;
+      targetRowInfo = { selector, index: validRows[0].index, text: validRows[0].text };
       log("  ⚠️ No exact match found. Falling back to first valid search result row.", "yellow");
     }
 
     if (targetRow) break;
   }
 
-  if (!targetRow) {
+  if (!targetRowInfo) {
     await takeScreenshot(page, "00_no_search_rows_found");
     throw new Error("Could not find property in search results (no valid rows found). This usually means the search returned no results or the page did not load properly. Check screenshot: 00_no_search_rows_found*.png");
   }
@@ -373,7 +383,76 @@ async function selectPropertyFromResults(page, searchQuery) {
   // Click the row and wait for the hash-based URL to change to the listing view pattern.
   log("  Clicking result row and waiting for listing URL ...", "dim");
 
-  await clickElementSafely(page, targetRow, "search result row");
+  const freshRows = await page.$$(targetRowInfo.selector);
+  const rowHandle = freshRows[targetRowInfo.index] || targetRow;
+  const rowNavigation = await page.evaluate(({ selector, index }) => {
+    const rows = Array.from(document.querySelectorAll(selector));
+    const row = rows[index];
+    if (!row) return { foundRow: false };
+    const hrefs = [];
+    row.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.getAttribute("href");
+      if (href) hrefs.push(href);
+    });
+    row.querySelectorAll("[data-href]").forEach((el) => {
+      const href = el.getAttribute("data-href");
+      if (href) hrefs.push(href);
+    });
+    const listingMatch = row.innerHTML.match(/listing\/([a-f0-9]{24})/i);
+    const listingId = listingMatch ? listingMatch[1] : "";
+    const listingHref = hrefs.find((h) => /\/listing\/[^/]+\/view/i.test(h)) ||
+      hrefs.find((h) => /\/listing\/[a-f0-9]{24}/i.test(h)) ||
+      "";
+    const clickable =
+      row.querySelector("button, a[role='button'], [role='button']") ||
+      row.querySelector("td a, td button");
+    return {
+      foundRow: true,
+      href: listingHref,
+      id: listingId,
+      hasClickable: Boolean(clickable)
+    };
+  }, targetRowInfo);
+
+  if (rowNavigation?.href) {
+    const href = rowNavigation.href;
+    log(`  🔗 Found listing link in row: ${href}`, "dim");
+    if (href.startsWith("http")) {
+      await page.goto(href, { waitUntil: "networkidle2", timeout: CONFIG.navigationTimeout });
+    } else {
+      await page.evaluate((h) => {
+        if (h.startsWith("http")) {
+          window.location.href = h;
+        } else if (h.startsWith("#")) {
+          window.location.href = h;
+        } else if (h.startsWith("/")) {
+          window.location.href = `https://edge.brokerbay.com${h}`;
+        } else {
+          window.location.href = `https://edge.brokerbay.com/${h.replace(/^#?/, "")}`;
+        }
+      }, href);
+    }
+  } else if (rowNavigation?.id) {
+    const forcedHash = `#/listing/${rowNavigation.id}/view`;
+    log(`  🧭 Found listing id in row: ${rowNavigation.id}`, "dim");
+    await page.evaluate((h) => {
+      window.location.href = h;
+    }, forcedHash);
+  } else {
+    if (rowHandle && rowNavigation?.hasClickable) {
+      const clickableHandle = await rowHandle.$("button, a[role='button'], [role='button'], td a, td button");
+      if (clickableHandle) {
+        await clickElementSafely(page, clickableHandle, "search result action");
+        await clickableHandle.dispose();
+      } else {
+        await clickElementSafely(page, rowHandle, "search result row");
+      }
+    } else if (rowHandle) {
+      await clickElementSafely(page, rowHandle, "search result row");
+    } else {
+      log("  ❌ Could not re-acquire search result row for clicking", "red");
+    }
+  }
 
   // Try to detect navigation either by URL change OR by listing UI appearing.
   const detectListingViewOnce = async () => {
@@ -835,19 +914,66 @@ async function selectDateStep(page, preferredDate = null) {
   const currentMonth = now.getMonth();
   const currentYear = now.getFullYear();
 
+  async function navigateMonths(page, steps) {
+    if (!steps) return true;
+    const selectorsNext = [
+      'button[aria-label*="Next"]',
+      '.bb-calendar__nav-right',
+      '.fc-next-button',
+      '.calendar-nav .next',
+      '[ng-click*="nextMonth"]'
+    ];
+    const selectorsPrev = [
+      'button[aria-label*="Prev"]',
+      '.bb-calendar__nav-left',
+      '.fc-prev-button',
+      '.calendar-nav .prev',
+      '[ng-click*="prevMonth"]'
+    ];
+    const tries = Math.min(Math.abs(steps), 2); // limit to one month ahead/behind to avoid surprises
+    const set = steps > 0 ? selectorsNext : selectorsPrev;
+    for (let i = 0; i < tries; i++) {
+      let clicked = false;
+      for (const sel of set) {
+        const btn = await page.$(sel);
+        if (btn) {
+          await btn.click();
+          clicked = true;
+          break;
+        }
+      }
+      if (!clicked) return false;
+      await wait(800);
+    }
+    return true;
+  }
+
   // Validate and process preferred date if provided
   if (preferredDate) {
     let dayToSelect;
+    let targetMonth = currentMonth;
+    let targetYear = currentYear;
     
     // Handle different input formats
     if (preferredDate.includes('-')) {
       // Format: "YYYY-MM-DD" or "2025-12-25"
       const dateObj = new Date(preferredDate);
       dayToSelect = dateObj.getDate();
+      targetMonth = dateObj.getMonth();
+      targetYear = dateObj.getFullYear();
       
-      // Validate it's in the current month and year
-      if (dateObj.getMonth() !== currentMonth || dateObj.getFullYear() !== currentYear) {
-        log(`  ⚠️ Preferred date ${preferredDate} is not in the current month. Using day ${dayToSelect} instead.`, 'yellow');
+      // Navigate months if needed (limit to adjacent months)
+      if (targetYear !== currentYear) {
+        log(`  ❌ Preferred date ${preferredDate} is not in the current year; skipping.`, 'red');
+        throw new Error(`Preferred date ${preferredDate} is outside the current year view`);
+      }
+      const monthDiff = targetMonth - currentMonth;
+      if (monthDiff !== 0) {
+        const ok = await navigateMonths(page, monthDiff);
+        if (!ok) {
+          throw new Error(`Could not change calendar month for ${preferredDate}`);
+        }
+        log(`  🔀 Navigated calendar by ${monthDiff} month(s)`, 'dim');
       }
     } else {
       // Format: just the day number (e.g., "25")
@@ -856,9 +982,9 @@ async function selectDateStep(page, preferredDate = null) {
     
     // Validate the day is valid
     if (isNaN(dayToSelect) || dayToSelect < 1 || dayToSelect > 31) {
-      log(`  ⚠️ Invalid date: ${preferredDate}. Must be between 1-31.`, 'yellow');
-    } else if (dayToSelect < currentDay) {
-      log(`  ⚠️ Date ${dayToSelect} is in the past. Current day is ${currentDay}. Will try to select it anyway (may be available for next month).`, 'yellow');
+      throw new Error(`Invalid date: ${preferredDate}. Must be between 1-31.`);
+    } else if (dayToSelect < currentDay && targetMonth === currentMonth) {
+      throw new Error(`Date ${dayToSelect} is in the past for this month. Today is ${currentDay}.`);
     } else {
       log(`  ✓ Valid date requested: ${dayToSelect} (Current day: ${currentDay})`, 'dim');
     }
@@ -870,40 +996,20 @@ async function selectDateStep(page, preferredDate = null) {
       const targetDay = parseInt(targetDayStr, 10);
       if (Number.isNaN(targetDay)) return { success: false, reason: 'Invalid day number' };
 
-      // Comprehensive selectors for BrokerBay calendar
-      const selectors = [
-        // BrokerBay specific selectors
-        'td.day:not(.disabled):not(.old):not(.new)',
-        'td.available:not(.disabled)',
-        '.calendar-day:not(.disabled):not(.old):not(.new)',
-        // Generic calendar selectors
-        'button[class*="date"]:not([disabled])',
-        'div[class*="day"]:not([class*="disabled"])',
-        '[role="gridcell"]:not([aria-disabled="true"])',
-        // Fallback to any clickable date element
-        'td.day',
-        '.calendar-day',
-        'button[class*="day"]'
-      ];
-
       const normalizeCellDay = (el) => {
-        // Try aria-label first (most reliable)
         const aria = el.getAttribute('aria-label') || '';
         const ariaMatch = aria.match(/\b(\d{1,2})\b/);
         if (ariaMatch) {
           return parseInt(ariaMatch[1], 10);
         }
 
-        // Try data attributes
         const dataDate = el.getAttribute('data-date') || el.getAttribute('data-day');
         if (dataDate) {
           const parsed = parseInt(dataDate, 10);
           if (!isNaN(parsed)) return parsed;
         }
 
-        // Try text content
         const text = (el.textContent || el.innerText || '').trim();
-        // Match only standalone numbers (not "Dec 25" but "25")
         const textMatch = text.match(/^\s*(\d{1,2})\s*$/);
         if (textMatch) {
           return parseInt(textMatch[1], 10);
@@ -913,69 +1019,121 @@ async function selectDateStep(page, preferredDate = null) {
       };
 
       const isElementDisabled = (el) => {
-        // Check various disabled states
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
         const classes = el.className || '';
         if (classes.includes('disabled') || classes.includes('old') || classes.includes('new')) return true;
         const style = window.getComputedStyle(el);
-        if (style.pointerEvents === 'none' || style.opacity === '0') return true;
+        if (style.pointerEvents === 'none' || style.opacity === '0' || style.visibility === 'hidden') return true;
         return false;
       };
 
-      // Try each selector
-      for (const selector of selectors) {
-        const elements = Array.from(document.querySelectorAll(selector));
+      const tryClickElement = (el) => {
+        try {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.click();
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+          el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          return true;
+        } catch (err) {
+          return false;
+        }
+      };
+
+      const findAndClickDate = (parentSelector, childSelector = null) => {
+        const parents = Array.from(document.querySelectorAll(parentSelector));
         
-        for (const el of elements) {
-          const cellDay = normalizeCellDay(el);
+        for (const parent of parents) {
+          const candidates = childSelector 
+            ? Array.from(parent.querySelectorAll(childSelector))
+            : [parent];
           
-          // Found matching day
-          if (!Number.isNaN(cellDay) && cellDay === targetDay) {
-            // Check if it's disabled
-            if (isElementDisabled(el)) {
-              continue; // Try next element with same day (might be multiple)
-            }
+          for (const el of candidates) {
+            const cellDay = normalizeCellDay(childSelector ? parent : el);
             
-            // Try to click it
-            try {
-              // Scroll into view first
-              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          if (!Number.isNaN(cellDay) && cellDay === targetDay) {
+              if (isElementDisabled(el) || isElementDisabled(parent)) {
+                continue;
+              }
               
-              // Wait a bit for scroll
-              setTimeout(() => {}, 300);
+              if (tryClickElement(el)) {
+                return { 
+                  success: true, 
+                  day: cellDay, 
+                  element: el.tagName,
+                  selector: parentSelector + (childSelector ? ' > ' + childSelector : '')
+                };
+              }
+            }
+          }
+        }
+        return null;
+      };
+
+      const strategies = [
+        ['td.day:not(.disabled):not(.old):not(.new)', 'button'],
+        ['td.day:not(.disabled):not(.old):not(.new)', null],
+        ['button.day:not(.disabled):not(.old):not(.new)', null],
+        ['td[class*="day"]:not([class*="disabled"])', 'button'],
+        ['td[class*="day"]:not([class*="disabled"])', null],
+        ['[role="gridcell"]', 'button'],
+        ['[role="gridcell"]', null],
+        ['td.day', 'button'],
+        ['td.day', null],
+        ['button[class*="day"]', null],
+        ['.calendar-day', 'button'],
+        ['.calendar-day', null]
+      ];
+
+      const debugInfo = { found: [], disabled: [] };
+      
+      for (const [parentSelector, childSelector] of strategies) {
+        const parents = Array.from(document.querySelectorAll(parentSelector));
+        
+        for (const parent of parents) {
+          const candidates = childSelector 
+            ? Array.from(parent.querySelectorAll(childSelector))
+            : [parent];
+          
+          for (const el of candidates) {
+            const cellDay = normalizeCellDay(childSelector ? parent : el);
+            
+            if (!Number.isNaN(cellDay) && cellDay === targetDay) {
+              debugInfo.found.push({
+                selector: parentSelector + (childSelector ? ' > ' + childSelector : ''),
+                day: cellDay,
+                disabled: isElementDisabled(el) || isElementDisabled(parent)
+              });
               
-              // Click
-              el.click();
+              if (isElementDisabled(el) || isElementDisabled(parent)) {
+                debugInfo.disabled.push(parentSelector);
+                continue;
+              }
               
-              // Also dispatch events for robustness
-              el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-              el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-              el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-              
+              if (tryClickElement(el)) {
               return { 
                 success: true, 
                 day: cellDay, 
                 element: el.tagName,
-                selector: selector 
+                  selector: parentSelector + (childSelector ? ' > ' + childSelector : '')
               };
-            } catch (err) {
-              continue; // Try next element
+              }
             }
           }
         }
       }
 
-      // If we get here, date wasn't found
       return { 
         success: false, 
-        reason: `Date ${targetDay} not found in calendar or all instances were disabled` 
+        reason: `Date ${targetDay} not found in calendar or all instances were disabled`,
+        debug: debugInfo
       };
     }, dayToSelect.toString());
 
     if (dateSelectionResult.success) {
       log(`  ✅ Successfully selected date ${dateSelectionResult.day}`, 'green');
       log(`  📍 Used selector: ${dateSelectionResult.selector}`, 'dim');
-      await wait(3000); // Wait longer for time slots to load
+      await wait(3000);
       
       // Verify time slots appeared
       const timeSlotsAppeared = await page.evaluate(() => {
@@ -1003,6 +1161,12 @@ async function selectDateStep(page, preferredDate = null) {
       }
     } else {
       log(`  ❌ Failed to select date ${dayToSelect}: ${dateSelectionResult.reason}`, 'yellow');
+      if (dateSelectionResult.debug?.found.length > 0) {
+        log(`  📊 Debug: Found ${dateSelectionResult.debug.found.length} element(s) with day ${dayToSelect}`, 'dim');
+        dateSelectionResult.debug.found.forEach((item, idx) => {
+          log(`    ${idx + 1}. ${item.selector} (disabled: ${item.disabled})`, 'dim');
+        });
+      }
       log(`  ⚠️ Falling back to automatic date selection...`, 'yellow');
     }
   }
@@ -1139,42 +1303,111 @@ async function selectTimeAndDurationStep(page) {
   
   await wait(2000); // Wait for time slots to render
   
-  // First, select duration if available
-  const durationSelectors = [
-    `input[type="radio"][value="${USER_PROFILE.preferredDuration}"]`,
-    `input[type="radio"][name*="duration"]`
-  ];
-  
-  log(`  Looking for ${USER_PROFILE.preferredDuration} minute duration option...`, 'dim');
-  
-  let durationSet = false;
-  for (const selector of durationSelectors) {
-    const radios = await page.$$(selector);
-    
-    for (const radio of radios) {
-      try {
-        const value = await page.evaluate(el => el.value, radio);
-        const label = await page.evaluate(el => {
-          const labelElement = el.closest("label") || el.parentElement;
-          return labelElement ? labelElement.textContent : "";
-        }, radio);
-        
-        if (value == USER_PROFILE.preferredDuration || label.includes(USER_PROFILE.preferredDuration.toString())) {
-          await radio.click();
-          await wait(1500);
-          log(`  ✓ Selected duration: ${USER_PROFILE.preferredDuration} minutes`, "dim");
-          durationSet = true;
-          break;
-        }
-      } catch (error) {
-        continue;
-      }
+  const readDurationOptions = async () => {
+    return page.evaluate(() => {
+      const parseMinutes = (text) => {
+        const match = (text || "").match(/(\d{1,3})\s*min/i);
+        return match ? parseInt(match[1], 10) : null;
+      };
+      const options = [];
+      const seen = new Set();
+      const inputs = Array.from(document.querySelectorAll('input[type="radio"]'));
+      inputs.forEach((input) => {
+        const labelEl =
+          input.closest("label") ||
+          (input.id ? document.querySelector(`label[for="${input.id}"]`) : null);
+        const labelText = (labelEl?.textContent || "").trim();
+        const nameBlob = `${input.name || ""} ${input.id || ""} ${input.className || ""}`.toLowerCase();
+        const valueFromInput = parseInt(input.value, 10);
+        const valueFromLabel = parseMinutes(labelText);
+        const minutes = Number.isFinite(valueFromInput) ? valueFromInput : valueFromLabel;
+        if (!minutes) return;
+        if (!/duration|length|min/.test(nameBlob + " " + labelText.toLowerCase())) return;
+        if (seen.has(minutes)) return;
+        seen.add(minutes);
+        options.push({
+          minutes,
+          label: labelText || `${minutes} minutes`,
+          disabled: Boolean(input.disabled) || input.getAttribute("aria-disabled") === "true"
+        });
+      });
+      const buttonOptions = Array.from(document.querySelectorAll("button"))
+        .map((btn) => {
+          const text = (btn.textContent || "").trim();
+          const minutes = parseMinutes(text);
+          if (!minutes) return null;
+          return {
+            minutes,
+            label: text || `${minutes} minutes`,
+            disabled: Boolean(btn.disabled) || btn.getAttribute("aria-disabled") === "true"
+          };
+        })
+        .filter(Boolean);
+      buttonOptions.forEach((opt) => {
+        if (seen.has(opt.minutes)) return;
+        seen.add(opt.minutes);
+        options.push(opt);
+      });
+      return options;
+    });
+  };
+
+  const applyDurationSelection = async (preferredDuration) => {
+    const options = await readDurationOptions();
+    if (!options.length) {
+      return { applied: false, selected: preferredDuration, available: [] };
     }
-    
-    if (durationSet) break;
-  }
-  
-  await wait(1500);
+    const available = options.filter((opt) => !opt.disabled).map((opt) => opt.minutes).sort((a, b) => a - b);
+    if (!available.length) {
+      return { applied: false, selected: preferredDuration, available: options.map((o) => o.minutes) };
+    }
+    const min = available[0];
+    const max = available[available.length - 1];
+    let selected = preferredDuration;
+    if (preferredDuration < min) {
+      selected = min;
+    } else if (preferredDuration > max) {
+      selected = max;
+    } else if (!available.includes(preferredDuration)) {
+      selected = available.reduce((closest, current) => {
+        const delta = Math.abs(current - preferredDuration);
+        const bestDelta = Math.abs(closest - preferredDuration);
+        return delta < bestDelta ? current : closest;
+      }, available[0]);
+    }
+    const clicked = await page.evaluate((target) => {
+      const parseMinutes = (text) => {
+        const match = (text || "").match(/(\d{1,3})\s*min/i);
+        return match ? parseInt(match[1], 10) : null;
+      };
+      const inputs = Array.from(document.querySelectorAll('input[type="radio"]'));
+      for (const input of inputs) {
+        const labelEl =
+          input.closest("label") ||
+          (input.id ? document.querySelector(`label[for="${input.id}"]`) : null);
+        const labelText = (labelEl?.textContent || "").trim();
+        const valueFromInput = parseInt(input.value, 10);
+        const valueFromLabel = parseMinutes(labelText);
+        const minutes = Number.isFinite(valueFromInput) ? valueFromInput : valueFromLabel;
+        if (minutes === target && !input.disabled && input.getAttribute("aria-disabled") !== "true") {
+          input.click();
+          input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          return true;
+        }
+      }
+      const buttons = Array.from(document.querySelectorAll("button"));
+      for (const btn of buttons) {
+        const minutes = parseMinutes(btn.textContent || "");
+        if (minutes === target && !btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
+          btn.click();
+          btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          return true;
+        }
+      }
+      return false;
+    }, selected);
+    return { applied: clicked, selected, available };
+  };
   
   const timeSlotSelectors = [
     'button[class*="time"]:not([disabled])',
@@ -1223,6 +1456,8 @@ async function selectTimeAndDurationStep(page) {
   }
   
   const normalizedPreferredTime = (preferredTimeArg || "").trim();
+  let selectedDuration = USER_PROFILE.preferredDuration;
+  log(`  Preferred duration request: ${USER_PROFILE.preferredDuration} minutes`, "dim");
   
   for (const selector of timeSlotSelectors) {
     const slots = await page.$$(selector);
@@ -1356,6 +1591,24 @@ async function selectTimeAndDurationStep(page) {
       if (selectedSlot) {
         await clickElementSafely(page, selectedSlot.element, `time slot ${selectedSlot.text}`);
         await wait(CONFIG.waitAfterAction);
+        const durationInfo = await applyDurationSelection(USER_PROFILE.preferredDuration);
+        if (durationInfo.available.length) {
+          log(`  Available durations: ${durationInfo.available.join(", ")} minutes`, "dim");
+        } else {
+          log(`  ⚠️ No duration options detected for this slot`, "yellow");
+        }
+        if (durationInfo.applied) {
+          selectedDuration = durationInfo.selected;
+          if (durationInfo.selected !== USER_PROFILE.preferredDuration) {
+            log(`  ✓ Duration adjusted to ${durationInfo.selected} minutes based on listing limits`, "dim");
+          } else {
+            log(`  ✓ Duration set to ${durationInfo.selected} minutes`, "dim");
+          }
+        } else if (durationInfo.available.length) {
+          log(`  ⚠️ Could not apply duration ${durationInfo.selected} minutes`, "yellow");
+        }
+        log(`  ⏳ Waiting 30 seconds for duration to apply...`, "dim");
+        await wait(30000);
         await waitForAutoConfirmButton(page, 20000);
         log(`  ✓ Time slot clicked`, "dim");
         break;
@@ -1372,7 +1625,7 @@ async function selectTimeAndDurationStep(page) {
   
   return {
     time: selectedSlot.text,
-    duration: `${USER_PROFILE.preferredDuration} minutes`,
+    duration: `${selectedDuration} minutes`,
     autoConfirm: autoConfirm
   };
 }

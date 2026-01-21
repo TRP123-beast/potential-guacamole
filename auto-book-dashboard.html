@@ -160,6 +160,7 @@
 
         input[type="number"] {
             -moz-appearance: textfield;
+            appearance: textfield;
         }
 
         input[type="number"]::-webkit-inner-spin-button,
@@ -548,6 +549,16 @@
                         </div>
                         <div class="helper-text" id="dateWarning" style="display:none; color: #d97706; font-weight: 600; margin-top: 8px;"></div>
                     </div>
+                    <div class="input-group">
+                        <label for="durationInput">Preferred duration</label>
+                        <select id="durationInput" style="width: 100%; padding: 14px 18px; border: 2px solid #e5e7eb; border-radius: 12px; font-size: 1em; transition: all 0.3s ease;">
+                            <option value="15">15 minutes</option>
+                            <option value="30">30 minutes</option>
+                            <option value="45">45 minutes</option>
+                            <option value="60" selected>60 minutes</option>
+                        </select>
+                        <div class="helper-text">If the listing limits durations, the script auto-adjusts to the closest allowed option.</div>
+                    </div>
                     <div class="toggle">
                         <input type="checkbox" id="showBrowser">
                         <label for="showBrowser">Show Chrome window (disables headless mode)</label>
@@ -619,7 +630,7 @@
         <div class="card note-card">
             <h3>What happens behind the scenes</h3>
             <ol>
-                    <li>The server spawns <code>node auto-book-enhanced.js &lt;property&gt; [&lt;preferred time&gt;]</code> with the options you toggled here.</li>
+                    <li>The server spawns <code>node auto-book-enhanced.js &lt;property&gt; [&lt;preferred time&gt;] [&lt;preferred date&gt;] [&lt;preferred duration&gt;]</code> with the options you toggled here.</li>
                     <li>The Puppeteer session logs in with your saved profile, searches the listing, books a showing, and hits AUTO-CONFIRM whenever possible.</li>
                 <li>Every console line is streamed back into this page so you can watch progress without touching the CLI.</li>
                 <li>Confirmed bookings flow straight into the shared SQLite database, which powers the dashboard next door.</li>
@@ -633,6 +644,7 @@
         const showBrowserInput = document.getElementById('showBrowser');
         const timeInput = document.getElementById('timeInput');
         const dateInput = document.getElementById('dateInput');
+        const durationInput = document.getElementById('durationInput');
         const autoConfirmInput = document.getElementById('autoConfirmOnly');
         const startRunBtn = document.getElementById('startRunBtn');
         const formAlert = document.getElementById('formAlert');
@@ -722,6 +734,7 @@
             propertyInput.disabled = disabled;
             timeInput.disabled = disabled;
             dateInput.disabled = disabled;
+            durationInput.disabled = disabled;
             showBrowserInput.disabled = disabled;
             autoConfirmInput.disabled = disabled;
             startRunBtn.disabled = disabled;
@@ -995,6 +1008,7 @@
                         property,
                         preferredTime: preferredTime || undefined,
                         preferredDate: preferredDate || undefined,
+                        preferredDuration: parseInt(durationInput.value, 10) || undefined,
                         headless: !showBrowserInput.checked,
                         autoConfirmOnly: autoConfirmInput.checked
                     })

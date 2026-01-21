@@ -117,11 +117,14 @@ function startAutoBookJob(job) {
 
   const args = ["auto-book-enhanced.js", job.property];
   
-  if (job.options.preferredTime || job.options.preferredDate) {
+  if (job.options.preferredTime || job.options.preferredDate || job.options.preferredDuration) {
     args.push(job.options.preferredTime || "");
   }
-  if (job.options.preferredDate) {
-    args.push(job.options.preferredDate);
+  if (job.options.preferredDate || job.options.preferredDuration) {
+    args.push(job.options.preferredDate || "");
+  }
+  if (job.options.preferredDuration) {
+    args.push(String(job.options.preferredDuration));
   }
 
   const child = spawn("node", args, {
@@ -168,7 +171,8 @@ app.post("/api/auto-book", (req, res) => {
     headless = true,
     autoConfirmOnly = false,
     preferredTime,
-    preferredDate
+    preferredDate,
+    preferredDuration
   } = req.body || {};
   if (!property || property.trim().length < 5) {
     return res.status(400).json({
@@ -183,7 +187,9 @@ app.post("/api/auto-book", (req, res) => {
     preferredTime:
       typeof preferredTime === "string" ? preferredTime.trim() : "",
     preferredDate:
-      typeof preferredDate === "string" ? preferredDate.trim() : ""
+      typeof preferredDate === "string" ? preferredDate.trim() : "",
+    preferredDuration:
+      Number.isFinite(Number(preferredDuration)) ? Number(preferredDuration) : null
   });
 
   res.status(202).json({

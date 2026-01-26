@@ -27,6 +27,20 @@ async function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function getExecutablePath() {
+  const envPath = process.env.BROWSER_EXECUTABLE_PATH;
+  if (envPath) {
+    try {
+      await fs.access(envPath);
+      return envPath;
+    } catch {
+      console.warn(`⚠️  BROWSER_EXECUTABLE_PATH set but file not found: ${envPath}`);
+      console.warn(`   Falling back to Puppeteer's bundled Chrome`);
+    }
+  }
+  return undefined;
+}
+
 // User profile configuration
 const USER_PROFILE = {
   name: process.env.USER_NAME || "NAHEED VALYANI",
@@ -1905,10 +1919,10 @@ async function autoBookShowing() {
     
     // Launch browser with stealth mode
     logStep(0, "Launching browser with stealth mode", 'info');
-    browser = await puppeteer.launch({
+    const executablePath = await getExecutablePath();
+    const launchOptions = {
       headless: CONFIG.headless,
       slowMo: CONFIG.slowMo,
-      executablePath: process.env.BROWSER_EXECUTABLE_PATH,
       userDataDir: process.env.BROWSER_PROFILE_USERDATA,
       args: [
         "--no-sandbox",
@@ -1917,7 +1931,11 @@ async function autoBookShowing() {
         "--disable-web-security",
         "--disable-features=VizDisplayCompositor"
       ]
-    });
+    };
+    if (executablePath) {
+      launchOptions.executablePath = executablePath;
+    }
+    browser = await puppeteer.launch(launchOptions);
     
     const page = await browser.newPage();
     await page.setViewport(CONFIG.viewport);

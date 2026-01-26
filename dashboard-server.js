@@ -190,7 +190,7 @@ app.post("/api/auto-book", (req, res) => {
       typeof preferredDate === "string" ? preferredDate.trim() : "",
     preferredDuration:
       Number.isFinite(Number(preferredDuration)) ? Number(preferredDuration) : null
-  });
+   });
 
   res.status(202).json({
     success: true,

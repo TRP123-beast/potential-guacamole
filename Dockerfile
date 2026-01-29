@@ -28,6 +28,11 @@ RUN mkdir -p /app/src/data /app/src/data/screenshots && \
 # 6. Expose the port
 EXPOSE 3000
 
+# Create persistent session directory
+RUN mkdir -p /app/session-data && chmod 700 /app/session-data
+# Set session environment variable
+ENV BROWSER_PROFILE_USERDATA=/app/session-data
+
 # 7. Start using the entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

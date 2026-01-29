@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -394,7 +395,7 @@
             line-height: 1.6;
         }
 
-        .guidelines li + li {
+        .guidelines li+li {
             margin-top: 8px;
         }
 
@@ -405,7 +406,7 @@
             line-height: 1.6;
         }
 
-        .note-card li + li {
+        .note-card li+li {
             margin-top: 8px;
         }
 
@@ -461,6 +462,7 @@
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <div class="nav-switcher">
@@ -502,10 +504,43 @@
             <div id="scheduledList" class="scheduled-list"></div>
         </div>
 
+        <div class="card scheduled-card">
+            <div class="scheduled-header">
+                <h3>🔐 Session Status</h3>
+                <span class="scheduled-subtitle" id="sessionSubtitle">Checking session...</span>
+            </div>
+            <div class="meta-row" style="margin-top: 15px; margin-bottom: 20px;">
+                <div>
+                    <span>Status</span>
+                    <strong id="sessionStatus" style="color: #6b7280;">Unknown</strong>
+                </div>
+                <div>
+                    <span>Last Login</span>
+                    <strong id="sessionLastLogin">Never</strong>
+                </div>
+                <div>
+                    <span>User Email</span>
+                    <strong id="sessionUserEmail">—</strong>
+                </div>
+            </div>
+            <div id="sessionWarning" class="alert error" style="display: none; margin-bottom: 15px;">
+                ⚠️ Session expired or invalid. Please run manual login to continue automation.
+            </div>
+            <button type="button" id="manualLoginBtn" class="action-btn"
+                style="background: linear-gradient(90deg, #059669, #10b981);">
+                🔑 Trigger Manual Login
+            </button>
+            <div class="helper-text" style="margin-top: 10px; text-align: center;">
+                Click above to open a browser window for one-time MFA login.<br>
+                Session typically lasts 7-30 days.
+            </div>
+        </div>
+
         <div class="hero-card">
             <div class="hero-text">
                 <h1>Auto-Booking Assistant</h1>
-                <p>Kick off the full BrokerBay automation run without touching the terminal. Type an address, watch the live feed, and let the assistant log everything into the shared dashboard database.</p>
+                <p>Kick off the full BrokerBay automation run without touching the terminal. Type an address, watch the
+                    live feed, and let the assistant log everything into the shared dashboard database.</p>
                 <div class="pill-row">
                     <span class="pill">Search + Auto-Confirm</span>
                     <span class="pill">Live Puppeteer Log</span>
@@ -526,10 +561,11 @@
                 <form id="autoBookForm">
                     <div class="input-group">
                         <label for="propertyInput">Property or address</label>
-                        <input type="text" id="propertyInput" placeholder="33 Singer Court #3008, Toronto, ON ..." autocomplete="off" required>
+                        <input type="text" id="propertyInput" placeholder="33 Singer Court #3008, Toronto, ON ..."
+                            autocomplete="off" required>
                         <div class="helper-text">
                             Paste the full MLS address if you want. The assistant will automatically keep only
-                            <strong>street number + street name + optional unit</strong>, e.g. 
+                            <strong>street number + street name + optional unit</strong>, e.g.
                             <code>78 A Queen Street 301</code> from
                             <code>78 A Queen Street 301, Bonnechere Valley, ON K0J 1T0, CA</code>.
                         </div>
@@ -537,27 +573,34 @@
                     <div class="input-group">
                         <label for="timeInput">Preferred time (optional)</label>
                         <input type="text" id="timeInput" placeholder="10:00 AM" autocomplete="off">
-                        <div class="helper-text">Works like the CLI: <code>node auto-book-enhanced.js "Address" "10:00 AM"</code>. If taken, the script moves forward to the next free slot.</div>
+                        <div class="helper-text">Works like the CLI:
+                            <code>node auto-book-enhanced.js "Address" "10:00 AM"</code>. If taken, the script moves
+                            forward to the next free slot.
+                        </div>
                     </div>
                     <div class="input-group">
                         <label for="dateInput">Preferred date (optional)</label>
                         <input type="number" id="dateInput" placeholder="25" autocomplete="off" min="1" max="31">
                         <div class="helper-text" id="dateHelperText">
-                            Enter day of month (1-31) within <strong>current month only</strong>. 
-                            Date must be <strong>today or later</strong> (Today is <span id="currentDayDisplay"></span>).
+                            Enter day of month (1-31) within <strong>current month only</strong>.
+                            Date must be <strong>today or later</strong> (Today is <span
+                                id="currentDayDisplay"></span>).
                             <br>Examples: <code>18</code>, <code>25</code>, <code>31</code>
                         </div>
-                        <div class="helper-text" id="dateWarning" style="display:none; color: #d97706; font-weight: 600; margin-top: 8px;"></div>
+                        <div class="helper-text" id="dateWarning"
+                            style="display:none; color: #d97706; font-weight: 600; margin-top: 8px;"></div>
                     </div>
                     <div class="input-group">
                         <label for="durationInput">Preferred duration</label>
-                        <select id="durationInput" style="width: 100%; padding: 14px 18px; border: 2px solid #e5e7eb; border-radius: 12px; font-size: 1em; transition: all 0.3s ease;">
+                        <select id="durationInput"
+                            style="width: 100%; padding: 14px 18px; border: 2px solid #e5e7eb; border-radius: 12px; font-size: 1em; transition: all 0.3s ease;">
                             <option value="15">15 minutes</option>
                             <option value="30">30 minutes</option>
                             <option value="45">45 minutes</option>
                             <option value="60" selected>60 minutes</option>
                         </select>
-                        <div class="helper-text">If the listing limits durations, the script auto-adjusts to the closest allowed option.</div>
+                        <div class="helper-text">If the listing limits durations, the script auto-adjusts to the closest
+                            allowed option.</div>
                     </div>
                     <div class="toggle">
                         <input type="checkbox" id="showBrowser">
@@ -575,12 +618,20 @@
             <div class="card guidelines">
                 <h3>Usage playbook</h3>
                 <ul>
-                    <li>Copy the exact address string from BrokerBay search so the assistant selects the right listing row.</li>
-                    <li>Optionally set a preferred time like <code>10:00 AM</code>; the runner behaves exactly like <code>node auto-book-enhanced.js "Address" "10:00 AM"</code> and will walk forward to the next available slot if that exact time is taken.</li>
-                    <li>Keep Chrome signed in to BrokerBay before launching headless runs. Use the visible browser option if the login session expired.</li>
-                    <li>The run writes every successful booking into <code>src/data/data.db</code>, so the dashboard picks it up instantly.</li>
-                    <li>Need the script to wait for auto-confirm slots only? Toggle the AUTO-CONFIRM switch before launching.</li>
-                    <li>Do not close the server window while a run is active—the process log here mirrors the actual CLI output.</li>
+                    <li>Copy the exact address string from BrokerBay search so the assistant selects the right listing
+                        row.</li>
+                    <li>Optionally set a preferred time like <code>10:00 AM</code>; the runner behaves exactly like
+                        <code>node auto-book-enhanced.js "Address" "10:00 AM"</code> and will walk forward to the next
+                        available slot if that exact time is taken.
+                    </li>
+                    <li>Keep Chrome signed in to BrokerBay before launching headless runs. Use the visible browser
+                        option if the login session expired.</li>
+                    <li>The run writes every successful booking into <code>src/data/data.db</code>, so the dashboard
+                        picks it up instantly.</li>
+                    <li>Need the script to wait for auto-confirm slots only? Toggle the AUTO-CONFIRM switch before
+                        launching.</li>
+                    <li>Do not close the server window while a run is active—the process log here mirrors the actual CLI
+                        output.</li>
                 </ul>
             </div>
         </div>
@@ -630,10 +681,16 @@
         <div class="card note-card">
             <h3>What happens behind the scenes</h3>
             <ol>
-                    <li>The server spawns <code>node auto-book-enhanced.js &lt;property&gt; [&lt;preferred time&gt;] [&lt;preferred date&gt;] [&lt;preferred duration&gt;]</code> with the options you toggled here.</li>
-                    <li>The Puppeteer session logs in with your saved profile, searches the listing, books a showing, and hits AUTO-CONFIRM whenever possible.</li>
-                <li>Every console line is streamed back into this page so you can watch progress without touching the CLI.</li>
-                <li>Confirmed bookings flow straight into the shared SQLite database, which powers the dashboard next door.</li>
+                <li>The server spawns
+                    <code>node auto-book-enhanced.js &lt;property&gt; [&lt;preferred time&gt;] [&lt;preferred date&gt;] [&lt;preferred duration&gt;]</code>
+                    with the options you toggled here.
+                </li>
+                <li>The Puppeteer session logs in with your saved profile, searches the listing, books a showing, and
+                    hits AUTO-CONFIRM whenever possible.</li>
+                <li>Every console line is streamed back into this page so you can watch progress without touching the
+                    CLI.</li>
+                <li>Confirmed bookings flow straight into the shared SQLite database, which powers the dashboard next
+                    door.</li>
             </ol>
         </div>
     </div>
@@ -663,6 +720,12 @@
         const queueProcessing = document.getElementById('queueProcessing');
         const queueCompleted = document.getElementById('queueCompleted');
         const queueFailed = document.getElementById('queueFailed');
+        const sessionStatus = document.getElementById('sessionStatus');
+        const sessionLastLogin = document.getElementById('sessionLastLogin');
+        const sessionUserEmail = document.getElementById('sessionUserEmail');
+        const sessionSubtitle = document.getElementById('sessionSubtitle');
+        const sessionWarning = document.getElementById('sessionWarning');
+        const manualLoginBtn = document.getElementById('manualLoginBtn');
 
         let eventSource = null;
         let activeJobId = null;
@@ -703,17 +766,17 @@
 
             // Check if it's within current month
             if (day > daysInCurrentMonth) {
-                return { 
-                    valid: false, 
-                    message: `Current month only has ${daysInCurrentMonth} days. Please enter 1-${daysInCurrentMonth}` 
+                return {
+                    valid: false,
+                    message: `Current month only has ${daysInCurrentMonth} days. Please enter 1-${daysInCurrentMonth}`
                 };
             }
 
             // Check if it's not in the past
             if (day < currentDay) {
-                return { 
-                    valid: false, 
-                    message: `Date ${day} is in the past. Today is day ${currentDay}. Please select ${currentDay} or later.` 
+                return {
+                    valid: false,
+                    message: `Date ${day} is in the past. Today is day ${currentDay}. Please select ${currentDay} or later.`
                 };
             }
 
@@ -823,14 +886,14 @@
 
         function renderAutoBookingQueue(queueData, stats) {
             queueList.innerHTML = '';
-            
+
             queuePending.textContent = stats.pendingCount;
             queueProcessing.textContent = stats.processingCount;
             queueCompleted.textContent = stats.completedCount;
             queueFailed.textContent = stats.failedCount;
 
             const totalItems = stats.pendingCount + stats.completedCount + stats.failedCount;
-            
+
             if (totalItems === 0) {
                 queueSubtitle.textContent = 'No auto-booking activity yet. Worker is listening for new showing requests...';
                 return;
@@ -855,7 +918,7 @@
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'scheduled-item';
-                
+
                 const statusEmoji = {
                     pending: '⏳',
                     processing: '⚙️',
@@ -879,10 +942,10 @@
 
                 btn.style.background = statusColors[item.queueStatus];
                 btn.style.color = statusTextColors[item.queueStatus];
-                
+
                 const label = item.address || item.property_id;
                 btn.textContent = `${statusEmoji[item.queueStatus]} ${label}`;
-                
+
                 if (item.queueStatus === 'pending' || item.queueStatus === 'processing') {
                     btn.style.cursor = 'default';
                 } else {
@@ -891,7 +954,7 @@
                         propertyInput.focus();
                     });
                 }
-                
+
                 queueList.appendChild(btn);
             });
         }
@@ -901,15 +964,15 @@
                 const res = await fetch('/api/auto-booking-queue');
                 const data = await res.json();
                 if (!data.success) {
-                    renderAutoBookingQueue({ pending: [], processing: [], completed: [], failed: [] }, 
-                                          { pendingCount: 0, processingCount: 0, completedCount: 0, failedCount: 0 });
+                    renderAutoBookingQueue({ pending: [], processing: [], completed: [], failed: [] },
+                        { pendingCount: 0, processingCount: 0, completedCount: 0, failedCount: 0 });
                     return;
                 }
                 renderAutoBookingQueue(data.data, data.stats);
             } catch (err) {
                 console.error('Error fetching auto-booking queue:', err);
-                renderAutoBookingQueue({ pending: [], processing: [], completed: [], failed: [] }, 
-                                      { pendingCount: 0, processingCount: 0, completedCount: 0, failedCount: 0 });
+                renderAutoBookingQueue({ pending: [], processing: [], completed: [], failed: [] },
+                    { pendingCount: 0, processingCount: 0, completedCount: 0, failedCount: 0 });
             }
         }
 
@@ -968,17 +1031,17 @@
             event.preventDefault();
             clearAlert();
             showDateWarning('');
-            
+
             const rawProperty = propertyInput.value.trim();
             const property = normalizePropertyAddress(rawProperty);
             const preferredTime = timeInput.value.trim();
             const preferredDate = dateInput.value.trim();
-            
+
             if (!property) {
                 setAlert('Enter a property address first.');
                 return;
             }
-            
+
             // Validate date input if provided
             if (preferredDate) {
                 const dateValidation = validateDateInput(preferredDate);
@@ -988,12 +1051,12 @@
                     return;
                 }
             }
-            
+
             // Update the input so the user sees the normalized value that will be used for search
             propertyInput.value = property;
             setFormDisabled(true);
             clearLogOutput();
-            
+
             if (preferredDate) {
                 appendLog({ level: 'info', timestamp: new Date().toISOString(), message: `Queued request for "${property}" on day ${preferredDate}...` });
             } else {
@@ -1060,30 +1123,97 @@
             // Display current day
             const currentDayDisplay = document.getElementById('currentDayDisplay');
             if (currentDayDisplay) {
-                const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
-                                   'July', 'August', 'September', 'October', 'November', 'December'];
+                const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                    'July', 'August', 'September', 'October', 'November', 'December'];
                 currentDayDisplay.textContent = `${monthNames[currentMonth]} ${currentDay}, ${currentYear}`;
             }
 
             // Update date input max attribute with days in current month
             dateInput.setAttribute('max', daysInCurrentMonth);
-            
+
             // Set min attribute to current day
             dateInput.setAttribute('min', currentDay);
-            
+
             // Update placeholder to show a valid example
             const exampleDay = Math.min(currentDay + 2, daysInCurrentMonth);
             dateInput.setAttribute('placeholder', exampleDay.toString());
         }
+
+        // Session status management
+        async function fetchSessionStatus() {
+            try {
+                const res = await fetch('/api/session-status');
+                const data = await res.json();
+                if (!data.success) {
+                    renderSessionStatus({ isValid: false, lastLogin: null, userEmail: null });
+                    return;
+                }
+                renderSessionStatus(data.session);
+            } catch (err) {
+                console.error('Error fetching session status:', err);
+                renderSessionStatus({ isValid: false, lastLogin: null, userEmail: null });
+            }
+        }
+
+        function renderSessionStatus(session) {
+            if (session.isValid) {
+                sessionStatus.textContent = '✅ Active';
+                sessionStatus.style.color = '#10b981';
+                sessionSubtitle.textContent = 'Session is active. Automation ready to use.';
+                sessionWarning.style.display = 'none';
+            } else {
+                sessionStatus.textContent = '❌ Expired';
+                sessionStatus.style.color = '#ef4444';
+                sessionSubtitle.textContent = 'Session expired. Manual login required.';
+                sessionWarning.style.display = 'block';
+            }
+
+            if (session.lastLogin) {
+                const loginDate = new Date(session.lastLogin);
+                sessionLastLogin.textContent = loginDate.toLocaleString();
+            } else {
+                sessionLastLogin.textContent = 'Never';
+            }
+
+            sessionUserEmail.textContent = session.userEmail || '—';
+        }
+
+        manualLoginBtn.addEventListener('click', async () => {
+            try {
+                manualLoginBtn.disabled = true;
+                manualLoginBtn.textContent = '🔄 Starting manual login...';
+
+                const res = await fetch('/api/manual-login', { method: 'POST' });
+                const data = await res.json();
+
+                if (data.success) {
+                    alert('✅ Manual login script started!\n\nA browser window should open shortly.\nComplete the MFA login process, then the session will be saved automatically.');
+
+                    // Poll for session status update
+                    setTimeout(() => {
+                        fetchSessionStatus();
+                    }, 5000);
+                } else {
+                    alert('❌ Failed to start manual login: ' + (data.error || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('❌ Error starting manual login: ' + err.message);
+            } finally {
+                manualLoginBtn.disabled = false;
+                manualLoginBtn.textContent = '🔑 Trigger Manual Login';
+            }
+        });
 
         // Initialize and fetch data
         initializePage();
         fetchLatestJob();
         fetchScheduledProperties();
         fetchAutoBookingQueue();
-        
+        fetchSessionStatus();
+
         setInterval(fetchAutoBookingQueue, 5000);
+        setInterval(fetchSessionStatus, 30000); // Check session every 30 seconds
     </script>
 </body>
-</html>
 
+</html>

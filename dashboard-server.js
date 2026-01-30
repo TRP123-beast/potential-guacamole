@@ -116,12 +116,15 @@ function startAutoBookJob(job) {
   appendLog(job, `Launching auto-book run for "${job.property}"...`);
 
   const args = ["auto-book-enhanced.js", job.property];
-  
-  if (job.options.preferredTime || job.options.preferredDate) {
+
+  if (job.options.preferredTime || job.options.preferredDate || job.options.preferredDuration) {
     args.push(job.options.preferredTime || "");
   }
-  if (job.options.preferredDate) {
-    args.push(job.options.preferredDate);
+  if (job.options.preferredDate || job.options.preferredDuration) {
+    args.push(job.options.preferredDate || "");
+  }
+  if (job.options.preferredDuration) {
+    args.push(String(job.options.preferredDuration));
   }
 
   const child = spawn("node", args, {
@@ -168,7 +171,8 @@ app.post("/api/auto-book", (req, res) => {
     headless = true,
     autoConfirmOnly = false,
     preferredTime,
-    preferredDate
+    preferredDate,
+    preferredDuration
   } = req.body || {};
   if (!property || property.trim().length < 5) {
     return res.status(400).json({
@@ -183,7 +187,9 @@ app.post("/api/auto-book", (req, res) => {
     preferredTime:
       typeof preferredTime === "string" ? preferredTime.trim() : "",
     preferredDate:
-      typeof preferredDate === "string" ? preferredDate.trim() : ""
+      typeof preferredDate === "string" ? preferredDate.trim() : "",
+    preferredDuration:
+      Number.isFinite(Number(preferredDuration)) ? Number(preferredDuration) : null
   });
 
   res.status(202).json({
@@ -316,10 +322,10 @@ app.get("/api/auto-book/:jobId/stream", (req, res) => {
 // Database helper
 function getDatabase() {
   const db = new Database("src/data/data.db");
-  try { 
-    db.pragma('foreign_keys = OFF'); 
-  } catch { 
-    db.exec("PRAGMA foreign_keys = OFF"); 
+  try {
+    db.pragma('foreign_keys = OFF');
+  } catch {
+    db.exec("PRAGMA foreign_keys = OFF");
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS bookings (
@@ -374,62 +380,62 @@ function getDatabase() {
 // GET all bookings
 app.get('/api/bookings', (req, res) => {
   const db = getDatabase();
-  
+
   try {
-    const { 
-      status, 
-      limit = 1000, 
+    const {
+      status,
+      limit = 1000,
       offset = 0,
       search,
       sortBy = 'created_at',
       sortOrder = 'DESC'
     } = req.query;
-    
+
     let query = 'SELECT * FROM bookings WHERE 1=1';
     const params = [];
-    
+
     // Filter by status
     if (status && status !== 'all') {
       query += ' AND status = ?';
       params.push(status);
     }
-    
+
     // Search filter
     if (search) {
       query += ' AND (property_address LIKE ? OR listing_id LIKE ? OR user_name LIKE ? OR user_email LIKE ?)';
       const searchParam = `%${search}%`;
       params.push(searchParam, searchParam, searchParam, searchParam);
     }
-    
+
     // Sorting
     const validSortColumns = ['created_at', 'booking_date', 'booking_time', 'status', 'property_address'];
     const sortColumn = validSortColumns.includes(sortBy) ? sortBy : 'created_at';
     const order = sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
     query += ` ORDER BY ${sortColumn} ${order}`;
-    
+
     // Pagination
     query += ' LIMIT ? OFFSET ?';
     params.push(parseInt(limit), parseInt(offset));
-    
+
     const bookings = db.prepare(query).all(...params);
-    
+
     // Get total count
     let countQuery = 'SELECT COUNT(*) as total FROM bookings WHERE 1=1';
     const countParams = [];
-    
+
     if (status && status !== 'all') {
       countQuery += ' AND status = ?';
       countParams.push(status);
     }
-    
+
     if (search) {
       countQuery += ' AND (property_address LIKE ? OR listing_id LIKE ? OR user_name LIKE ? OR user_email LIKE ?)';
       const searchParam = `%${search}%`;
       countParams.push(searchParam, searchParam, searchParam, searchParam);
     }
-    
+
     const { total } = db.prepare(countQuery).get(...countParams);
-    
+
     res.json({
       success: true,
       data: bookings,
@@ -451,18 +457,18 @@ app.get('/api/bookings', (req, res) => {
 // GET single booking by ID
 app.get('/api/bookings/:id', (req, res) => {
   const db = getDatabase();
-  
+
   try {
     const { id } = req.params;
     const booking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(id);
-    
+
     if (!booking) {
       return res.status(404).json({
         success: false,
         error: 'Booking not found'
       });
     }
-    
+
     res.json({
       success: true,
       data: booking
@@ -481,32 +487,32 @@ app.get('/api/bookings/:id', (req, res) => {
 // GET booking statistics
 app.get('/api/stats', (req, res) => {
   const db = getDatabase();
-  
+
   try {
     // Total bookings
     const { total } = db.prepare('SELECT COUNT(*) as total FROM bookings').get();
-    
+
     // Auto-confirmed
     const { autoConfirmed } = db.prepare('SELECT COUNT(*) as autoConfirmed FROM bookings WHERE auto_confirmed = 1').get();
-    
+
     // This week
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
     const { thisWeek } = db.prepare('SELECT COUNT(*) as thisWeek FROM bookings WHERE created_at >= ?').get(weekAgo.toISOString());
-    
+
     // Pending
     const { pending } = db.prepare('SELECT COUNT(*) as pending FROM bookings WHERE status = ?').get('Pending');
-    
+
     // Confirmed
     const { confirmed } = db.prepare('SELECT COUNT(*) as confirmed FROM bookings WHERE status = ?').get('Confirmed');
-    
+
     // By status
     const statusCounts = db.prepare(`
       SELECT status, auto_confirmed, COUNT(*) as count 
       FROM bookings 
       GROUP BY status, auto_confirmed
     `).all();
-    
+
     // Recent bookings (last 30 days)
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -517,7 +523,7 @@ app.get('/api/stats', (req, res) => {
       GROUP BY DATE(created_at)
       ORDER BY date DESC
     `).all(thirtyDaysAgo.toISOString());
-    
+
     // Top properties
     const topProperties = db.prepare(`
       SELECT property_address, COUNT(*) as booking_count
@@ -527,7 +533,7 @@ app.get('/api/stats', (req, res) => {
       ORDER BY booking_count DESC
       LIMIT 10
     `).all();
-    
+
     res.json({
       success: true,
       data: {
@@ -555,10 +561,10 @@ app.get('/api/stats', (req, res) => {
 // DELETE booking by ID
 app.delete('/api/bookings/:id', (req, res) => {
   const db = getDatabase();
-  
+
   try {
     const { id } = req.params;
-    
+
     // Check if booking exists
     const booking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(id);
     if (!booking) {
@@ -567,10 +573,10 @@ app.delete('/api/bookings/:id', (req, res) => {
         error: 'Booking not found'
       });
     }
-    
+
     // Delete booking
     db.prepare('DELETE FROM bookings WHERE id = ?').run(id);
-    
+
     res.json({
       success: true,
       message: 'Booking deleted successfully'
@@ -589,18 +595,18 @@ app.delete('/api/bookings/:id', (req, res) => {
 // UPDATE booking status
 app.patch('/api/bookings/:id', (req, res) => {
   const db = getDatabase();
-  
+
   try {
     const { id } = req.params;
     const { status } = req.body;
-    
+
     if (!status || !['Confirmed', 'Pending', 'Cancelled'].includes(status)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid status. Must be Confirmed, Pending, or Cancelled'
       });
     }
-    
+
     // Check if booking exists
     const booking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(id);
     if (!booking) {
@@ -609,13 +615,13 @@ app.patch('/api/bookings/:id', (req, res) => {
         error: 'Booking not found'
       });
     }
-    
+
     // Update status
     db.prepare('UPDATE bookings SET status = ? WHERE id = ?').run(status, id);
-    
+
     // Get updated booking
     const updatedBooking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(id);
-    
+
     res.json({
       success: true,
       data: updatedBooking,
@@ -635,16 +641,16 @@ app.patch('/api/bookings/:id', (req, res) => {
 // GET properties from database
 app.get('/api/properties', (req, res) => {
   const db = getDatabase();
-  
+
   try {
     const { search, limit = 20 } = req.query;
-    
+
     // Check if properties table exists
     const tableExists = db.prepare(`
       SELECT name FROM sqlite_master 
       WHERE type='table' AND name='properties'
     `).get();
-    
+
     if (!tableExists) {
       return res.json({
         success: true,
@@ -652,21 +658,21 @@ app.get('/api/properties', (req, res) => {
         message: 'Properties table not found'
       });
     }
-    
+
     let query = 'SELECT * FROM properties';
     const params = [];
-    
+
     if (search) {
       query += ' WHERE address LIKE ? OR property_id LIKE ?';
       const searchParam = `%${search}%`;
       params.push(searchParam, searchParam);
     }
-    
+
     query += ' LIMIT ?';
     params.push(parseInt(limit));
-    
+
     const properties = db.prepare(query).all(...params);
-    
+
     res.json({
       success: true,
       data: properties
@@ -835,19 +841,19 @@ app.get('/api/auto-booking-queue', (req, res) => {
 // Export bookings to CSV
 app.get('/api/export/csv', (req, res) => {
   const db = getDatabase();
-  
+
   try {
     const bookings = db.prepare('SELECT * FROM bookings ORDER BY created_at DESC').all();
-    
+
     // Create CSV
     const headers = [
-      'ID', 'Listing ID', 'Property Address', 'Booking Date', 'Booking Time', 
-      'Duration', 'User Name', 'User Email', 'Organization', 'Showing Type', 
+      'ID', 'Listing ID', 'Property Address', 'Booking Date', 'Booking Time',
+      'Duration', 'User Name', 'User Email', 'Organization', 'Showing Type',
       'Status', 'Auto Confirmed', 'Created At'
     ];
-    
+
     let csv = headers.join(',') + '\n';
-    
+
     bookings.forEach(booking => {
       const row = [
         booking.id,
@@ -864,10 +870,10 @@ app.get('/api/export/csv', (req, res) => {
         booking.auto_confirmed ? 'Yes' : 'No',
         booking.created_at
       ];
-      
+
       csv += row.map(cell => `"${cell}"`).join(',') + '\n';
     });
-    
+
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename=bookings.csv');
     res.send(csv);
@@ -885,10 +891,10 @@ app.get('/api/export/csv', (req, res) => {
 // Export bookings to JSON
 app.get('/api/export/json', (req, res) => {
   const db = getDatabase();
-  
+
   try {
     const bookings = db.prepare('SELECT * FROM bookings ORDER BY created_at DESC').all();
-    
+
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', 'attachment; filename=bookings.json');
     res.json({
@@ -911,11 +917,11 @@ app.get('/api/export/json', (req, res) => {
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   const db = getDatabase();
-  
+
   try {
     // Test database connection
     db.prepare('SELECT 1').get();
-    
+
     res.json({
       success: true,
       status: 'healthy',
@@ -945,6 +951,64 @@ app.get('/dashboard', (req, res) => {
 
 app.get('/auto-book', (req, res) => {
   res.sendFile(path.join(__dirname, 'auto-book-dashboard.html'));
+});
+
+// Session management endpoints
+app.get('/api/session-status', async (req, res) => {
+  try {
+    const { getSessionMetadata } = await import('./src/session-manager.js');
+    const metadata = await getSessionMetadata();
+    res.json({
+      success: true,
+      session: {
+        isValid: metadata.isValid || false,
+        lastLogin: metadata.lastLogin || null,
+        userEmail: metadata.userEmail || process.env.BROKERBAY_USERNAME || process.env.USER_EMAIL,
+        createdAt: metadata.createdAt || null
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching session status:', error);
+    res.json({
+      success: true,
+      session: {
+        isValid: false,
+        lastLogin: null,
+        userEmail: process.env.BROKERBAY_USERNAME || process.env.USER_EMAIL,
+        createdAt: null
+      }
+    });
+  }
+});
+app.post('/api/manual-login', (req, res) => {
+  try {
+    console.log('📝 Manual login requested from dashboard');
+
+    const child = spawn('node', ['manual-login.js'], {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        HEADLESS: 'false'
+      },
+      detached: true,
+      stdio: 'ignore'
+    });
+
+    child.unref();
+    console.log('✅ Manual login script started (PID: ' + child.pid + ')');
+
+    res.json({
+      success: true,
+      message: 'Manual login script started. A browser window should open shortly.',
+      pid: child.pid
+    });
+  } catch (error) {
+    console.error('❌ Error starting manual login:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // 404 handler

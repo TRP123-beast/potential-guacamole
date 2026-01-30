@@ -4,6 +4,7 @@ import { configDotenv } from "dotenv";
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { loginToBrokerBay } from "./src/utils.js";
+import fs from "fs/promises";
 
 configDotenv();
 puppeteer.use(StealthPlugin());
@@ -26,6 +27,17 @@ const CONFIG = {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function getExecutablePath() {
+  const path = process.env.BROWSER_EXECUTABLE_PATH;
+  if (!path) return undefined;
+  try {
+    await fs.access(path);
+    return path;
+  } catch {
+    return undefined;
+  }
+}
 
 function normalizePropertyAddress(raw) {
   if (!raw) return "";
@@ -73,14 +85,18 @@ async function main() {
   try {
     console.log("🔍 Checking property existence:", property);
 
-    browser = await puppeteer.launch({
+    const executablePath = await getExecutablePath();
+    const launchOptions = {
       headless: CONFIG.headless,
       slowMo: CONFIG.slowMo,
-      executablePath: process.env.BROWSER_EXECUTABLE_PATH,
       userDataDir: process.env.BROWSER_PROFILE_USERDATA,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
       protocolTimeout: CONFIG.navigationTimeout,
-    });
+    };
+    if (executablePath) {
+      launchOptions.executablePath = executablePath;
+    }
+    browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
     await page.setViewport(CONFIG.viewport);

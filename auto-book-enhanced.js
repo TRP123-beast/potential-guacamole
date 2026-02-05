@@ -1936,19 +1936,59 @@ async function autoBookShowing() {
     }
     browser = await launchWithSession(launchOptions);
 
-    const page = await browser.newPage();
+    logStep(0, "Browser launched/connected successfully", 'success');
+
+    // Reuse existing tab/session if connected to existing browser
+    let page;
+    let reusedTab = false;
+
+    if (browser.isConnectedToExisting) {
+      logStep("0.1", "Checking for open BrokerBay tabs...", 'info');
+      const pages = await browser.pages();
+
+      // Look for a tab that is already on BrokerBay
+      const brokerBayPage = pages.find(p => {
+        const url = p.url();
+        return url.includes('brokerbay.com') && !url.includes('auth.brokerbay.com/login');
+      });
+
+      if (brokerBayPage) {
+        log(`  ✓ Found existing BrokerBay tab: ${brokerBayPage.url()}`, 'green');
+        page = brokerBayPage;
+        reusedTab = true;
+
+        // Bring it to front
+        try {
+          await page.bringToFront();
+        } catch (e) {
+          log(`  ⚠️ Could not bring tab to front: ${e.message}`, 'dim');
+        }
+      } else {
+        log(`  ℹ️  No active BrokerBay tab found. Opening new tab...`, 'dim');
+        page = await browser.newPage();
+      }
+    } else {
+      page = await browser.newPage();
+    }
+
     await page.setViewport(CONFIG.viewport);
     await page.setDefaultTimeout(CONFIG.timeout);
     await page.setDefaultNavigationTimeout(CONFIG.navigationTimeout);
-    logStep(0, "Browser launched successfully", 'success');
 
     // Validate existing session (no login needed with MFA)
+    // Validate existing session (no login needed with MFA)
     logStep("0.5", "Validating existing session", 'info');
-    await page.goto(BROKERBAY_DASHBOARD, {
-      waitUntil: 'domcontentloaded',
-      timeout: CONFIG.navigationTimeout
-    });
-    await wait(3000);
+
+    // Only navigate if we didn't reuse a tab (or if the reused tab is on a different page)
+    if (!reusedTab || !page.url().includes('my_business')) {
+      await page.goto(BROKERBAY_DASHBOARD, {
+        waitUntil: 'domcontentloaded',
+        timeout: CONFIG.navigationTimeout
+      });
+      await wait(3000);
+    } else {
+      log(`  ✓ Already on dashboard/listing page`, 'dim');
+    }
 
     // Check if session is still valid
     await validateSessionOrPrompt(page);
@@ -2065,8 +2105,13 @@ async function autoBookShowing() {
         log("Browser will remain open for 10 seconds for inspection...", 'dim');
         await new Promise(resolve => setTimeout(resolve, 10000));
       }
-      await browser.close();
-      log("Browser closed\n", 'dim');
+      if (browser.isConnectedToExisting) {
+        log("Disconnecting from existing browser (keeping window open)...", 'dim');
+        browser.disconnect();
+      } else {
+        await browser.close();
+        log("Browser closed\n", 'dim');
+      }
     }
   }
 

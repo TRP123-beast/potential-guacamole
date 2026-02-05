@@ -109,6 +109,35 @@ export async function isSessionValid(page) {
 
 // Launch browser with persistent session
 export async function launchWithSession(options = {}) {
+    const debugPort = process.env.BROWSER_DEBUG_PORT || 9222;
+    const debugUrl = `http://127.0.0.1:${debugPort}/json/version`;
+
+    // Try to connect to existing browser first
+    try {
+        console.log(`🔍 Checking for existing browser on port ${debugPort}...`);
+        const { data } = await import("axios").then(m => m.default.get(debugUrl));
+
+        if (data && data.webSocketDebuggerUrl) {
+            console.log(`✅ Found existing browser! Connecting to: ${data.webSocketDebuggerUrl}`);
+
+            const browser = await puppeteer.connect({
+                browserWSEndpoint: data.webSocketDebuggerUrl,
+                defaultViewport: options.defaultViewport || { width: 1920, height: 1080 },
+                ...options
+            });
+
+            // Mark as existing session so we don't close it completely later
+            browser.isConnectedToExisting = true;
+
+            console.log('✅ Successfully connected to existing browser session');
+            return browser;
+        }
+    } catch (error) {
+        console.log(`ℹ️  No existing browser found on port ${debugPort} (or connection failed). Launching new instance...`);
+        console.log(`   Error details: ${error.message}`);
+    }
+
+    // Fallback to launching new instance
     try {
         const sessionDir = getSessionPath();
 
@@ -143,6 +172,10 @@ export async function launchWithSession(options = {}) {
             ],
             ...options
         };
+
+        // If we are launching, we might want to launch WITH remote debugging enabled
+        // so we can connect to it later if needed?
+        // launchOptions.args.push(`--remote-debugging-port=${debugPort}`);
 
         const browser = await puppeteer.launch(launchOptions);
         console.log('✅ Browser launched with persistent session');

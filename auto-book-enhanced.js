@@ -1236,224 +1236,360 @@ async function selectDateStep(page, preferredDate = null) {
 
   // Validate and process preferred date if provided
   if (preferredDate) {
-    let dayToSelect;
-    let targetMonth = currentMonth;
-    let targetYear = currentYear;
+    try {
+      let dayToSelect;
+      let targetMonth = currentMonth;
+      let targetYear = currentYear;
 
-    // Handle different input formats
-    if (preferredDate.includes('-')) {
-      // Format: "YYYY-MM-DD" or "2025-12-25"
-      const dateObj = new Date(preferredDate);
-      dayToSelect = dateObj.getDate();
-      targetMonth = dateObj.getMonth();
-      targetYear = dateObj.getFullYear();
-
-      // Navigate months if needed (limit to adjacent months)
-      if (targetYear !== currentYear) {
-        log(`  ❌ Preferred date ${preferredDate} is not in the current year; skipping.`, 'red');
-        throw new Error(`Preferred date ${preferredDate} is outside the current year view`);
-      }
-      const monthDiff = targetMonth - currentMonth;
-      if (monthDiff !== 0) {
-        const ok = await navigateMonths(page, monthDiff);
-        if (!ok) {
-          throw new Error(`Could not change calendar month for ${preferredDate}`);
+      // --- Parse the preferred date input ---
+      if (preferredDate.includes('-')) {
+        // Format: "YYYY-MM-DD" (e.g., "2026-02-17")
+        const dateObj = new Date(preferredDate + 'T00:00:00');
+        if (isNaN(dateObj.getTime())) {
+          log(`  ⚠️ Invalid date format: "${preferredDate}". Expected YYYY-MM-DD or a day number. Using default date.`, 'yellow');
+          // Fall through to auto-select
+        } else {
+          dayToSelect = dateObj.getDate();
+          targetMonth = dateObj.getMonth();
+          targetYear = dateObj.getFullYear();
         }
-        log(`  🔀 Navigated calendar by ${monthDiff} month(s)`, 'dim');
-      }
-    } else {
-      // Format: just the day number (e.g., "25")
-      dayToSelect = parseInt(preferredDate, 10);
-    }
-
-    // Validate the day is valid
-    if (isNaN(dayToSelect) || dayToSelect < 1 || dayToSelect > 31) {
-      throw new Error(`Invalid date: ${preferredDate}. Must be between 1-31.`);
-    } else if (dayToSelect < currentDay && targetMonth === currentMonth) {
-      throw new Error(`Date ${dayToSelect} is in the past for this month. Today is ${currentDay}.`);
-    } else {
-      log(`  ✓ Valid date requested: ${dayToSelect} (Current day: ${currentDay})`, 'dim');
-    }
-
-    log(`  🔍 Looking for date ${dayToSelect} in calendar...`, 'dim');
-
-    // Enhanced date selection with better error handling
-    const dateSelectionResult = await page.evaluate((targetDayStr) => {
-      const targetDay = parseInt(targetDayStr, 10);
-      if (Number.isNaN(targetDay)) return { success: false, reason: 'Invalid day number' };
-
-      const normalizeCellDay = (el) => {
-        const aria = el.getAttribute('aria-label') || '';
-        const ariaMatch = aria.match(/\b(\d{1,2})\b/);
-        if (ariaMatch) {
-          return parseInt(ariaMatch[1], 10);
-        }
-
-        const dataDate = el.getAttribute('data-date') || el.getAttribute('data-day');
-        if (dataDate) {
-          const parsed = parseInt(dataDate, 10);
-          if (!isNaN(parsed)) return parsed;
-        }
-
-        const text = (el.textContent || el.innerText || '').trim();
-        const textMatch = text.match(/^\s*(\d{1,2})\s*$/);
-        if (textMatch) {
-          return parseInt(textMatch[1], 10);
-        }
-
-        return NaN;
-      };
-
-      const isElementDisabled = (el) => {
-        if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
-        const classes = el.className || '';
-        if (classes.includes('disabled') || classes.includes('old') || classes.includes('new')) return true;
-        const style = window.getComputedStyle(el);
-        if (style.pointerEvents === 'none' || style.opacity === '0' || style.visibility === 'hidden') return true;
-        return false;
-      };
-
-      const tryClickElement = (el) => {
-        try {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          el.click();
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          return true;
-        } catch (err) {
-          return false;
-        }
-      };
-
-      const findAndClickDate = (parentSelector, childSelector = null) => {
-        const parents = Array.from(document.querySelectorAll(parentSelector));
-
-        for (const parent of parents) {
-          const candidates = childSelector
-            ? Array.from(parent.querySelectorAll(childSelector))
-            : [parent];
-
-          for (const el of candidates) {
-            const cellDay = normalizeCellDay(childSelector ? parent : el);
-
-            if (!Number.isNaN(cellDay) && cellDay === targetDay) {
-              if (isElementDisabled(el) || isElementDisabled(parent)) {
-                continue;
-              }
-
-              if (tryClickElement(el)) {
-                return {
-                  success: true,
-                  day: cellDay,
-                  element: el.tagName,
-                  selector: parentSelector + (childSelector ? ' > ' + childSelector : '')
-                };
-              }
-            }
-          }
-        }
-        return null;
-      };
-
-      const strategies = [
-        ['td.day:not(.disabled):not(.old):not(.new)', 'button'],
-        ['td.day:not(.disabled):not(.old):not(.new)', null],
-        ['button.day:not(.disabled):not(.old):not(.new)', null],
-        ['td[class*="day"]:not([class*="disabled"])', 'button'],
-        ['td[class*="day"]:not([class*="disabled"])', null],
-        ['[role="gridcell"]', 'button'],
-        ['[role="gridcell"]', null],
-        ['td.day', 'button'],
-        ['td.day', null],
-        ['button[class*="day"]', null],
-        ['.calendar-day', 'button'],
-        ['.calendar-day', null]
-      ];
-
-      const debugInfo = { found: [], disabled: [] };
-
-      for (const [parentSelector, childSelector] of strategies) {
-        const parents = Array.from(document.querySelectorAll(parentSelector));
-
-        for (const parent of parents) {
-          const candidates = childSelector
-            ? Array.from(parent.querySelectorAll(childSelector))
-            : [parent];
-
-          for (const el of candidates) {
-            const cellDay = normalizeCellDay(childSelector ? parent : el);
-
-            if (!Number.isNaN(cellDay) && cellDay === targetDay) {
-              debugInfo.found.push({
-                selector: parentSelector + (childSelector ? ' > ' + childSelector : ''),
-                day: cellDay,
-                disabled: isElementDisabled(el) || isElementDisabled(parent)
-              });
-
-              if (isElementDisabled(el) || isElementDisabled(parent)) {
-                debugInfo.disabled.push(parentSelector);
-                continue;
-              }
-
-              if (tryClickElement(el)) {
-                return {
-                  success: true,
-                  day: cellDay,
-                  element: el.tagName,
-                  selector: parentSelector + (childSelector ? ' > ' + childSelector : '')
-                };
-              }
-            }
-          }
-        }
-      }
-
-      return {
-        success: false,
-        reason: `Date ${targetDay} not found in calendar or all instances were disabled`,
-        debug: debugInfo
-      };
-    }, dayToSelect.toString());
-
-    if (dateSelectionResult.success) {
-      log(`  ✅ Successfully selected date ${dateSelectionResult.day}`, 'green');
-      log(`  📍 Used selector: ${dateSelectionResult.selector}`, 'dim');
-      await wait(3000);
-
-      // Verify time slots appeared
-      const timeSlotsAppeared = await page.evaluate(() => {
-        const slotSelectors = [
-          'button[class*="time"]:not([disabled])',
-          '.time-slot:not(.disabled)',
-          '[class*="slot"]:not([disabled])'
-        ];
-
-        for (const sel of slotSelectors) {
-          const slots = document.querySelectorAll(sel);
-          if (slots.length > 0) return true;
-        }
-        return false;
-      });
-
-      if (timeSlotsAppeared) {
-        log(`  ✅ Time slots loaded successfully`, 'green');
-        await takeScreenshot(page, '02_date_selected_preferred');
-        logStep(2, `Date ${dayToSelect} selected successfully`, 'success');
-        return true;
       } else {
-        log(`  ⚠️ Date clicked but time slots didn't appear. Retrying...`, 'yellow');
-        await wait(2000);
+        // Format: just the day number (e.g., "17")
+        const parsed = parseInt(preferredDate, 10);
+        if (isNaN(parsed) || parsed < 1 || parsed > 31) {
+          log(`  ⚠️ Invalid day number: "${preferredDate}". Must be 1-31. Using default date.`, 'yellow');
+        } else {
+          dayToSelect = parsed;
+        }
       }
-    } else {
-      log(`  ❌ Failed to select date ${dayToSelect}: ${dateSelectionResult.reason}`, 'yellow');
-      if (dateSelectionResult.debug?.found.length > 0) {
-        log(`  📊 Debug: Found ${dateSelectionResult.debug.found.length} element(s) with day ${dayToSelect}`, 'dim');
-        dateSelectionResult.debug.found.forEach((item, idx) => {
-          log(`    ${idx + 1}. ${item.selector} (disabled: ${item.disabled})`, 'dim');
-        });
+
+      if (dayToSelect !== undefined) {
+        // --- Validate: past date check ---
+        const targetDate = new Date(targetYear, targetMonth, dayToSelect);
+        const todayMidnight = new Date(currentYear, currentMonth, currentDay);
+
+        if (targetDate < todayMidnight) {
+          log(`  ⚠️ WARNING: Preferred date ${preferredDate} (${targetDate.toDateString()}) is in the past!`, 'yellow');
+          log(`  ⚠️ Today is ${todayMidnight.toDateString()}. Defaulting to today's date.`, 'yellow');
+          dayToSelect = currentDay;
+          targetMonth = currentMonth;
+          targetYear = currentYear;
+        } else {
+          log(`  ✓ Valid future date requested: day ${dayToSelect} (Today is day ${currentDay})`, 'dim');
+        }
+
+        // --- Navigate months if needed ---
+        if (targetYear !== currentYear || targetMonth !== currentMonth) {
+          const totalMonthDiff = (targetYear - currentYear) * 12 + (targetMonth - currentMonth);
+
+          if (Math.abs(totalMonthDiff) > 6) {
+            log(`  ⚠️ Date ${preferredDate} is too far away (${totalMonthDiff} months). Using default date.`, 'yellow');
+            dayToSelect = currentDay;
+            targetMonth = currentMonth;
+          } else if (totalMonthDiff !== 0) {
+            log(`  🔀 Navigating calendar by ${totalMonthDiff} month(s)...`, 'dim');
+            const isForward = totalMonthDiff > 0;
+            const steps = Math.abs(totalMonthDiff);
+
+            // BrokerBay calendar navigation arrow selectors
+            const arrowSelectors = isForward ? [
+              '.bb-calendar__nav-right',
+              'button[aria-label*="Next"]',
+              'button[aria-label*="next"]',
+              '.fc-next-button',
+              '.calendar-nav .next',
+              '[ng-click*="nextMonth"]',
+              '[ng-click*="next"]',
+              // Fallback: any > or › arrow on the right side of the calendar
+              '.calendar-header button:last-child',
+              '.cal-navigation button:last-child'
+            ] : [
+              '.bb-calendar__nav-left',
+              'button[aria-label*="Prev"]',
+              'button[aria-label*="prev"]',
+              '.fc-prev-button',
+              '.calendar-nav .prev',
+              '[ng-click*="prevMonth"]',
+              '[ng-click*="prev"]',
+              '.calendar-header button:first-child',
+              '.cal-navigation button:first-child'
+            ];
+
+            let navSuccess = true;
+            for (let i = 0; i < steps; i++) {
+              let clicked = false;
+              for (const sel of arrowSelectors) {
+                const btn = await page.$(sel);
+                if (btn) {
+                  await btn.click();
+                  clicked = true;
+                  log(`  ✓ Clicked month ${isForward ? 'next' : 'prev'} arrow (step ${i + 1}/${steps})`, 'dim');
+                  break;
+                }
+              }
+
+              // If CSS selectors didn't work, try finding the arrow by text content
+              if (!clicked) {
+                const arrowClicked = await page.evaluate((forward) => {
+                  const buttons = Array.from(document.querySelectorAll('button, a, span[role="button"]'));
+                  const arrowChars = forward ? ['›', '>', '▶', '»', 'next'] : ['‹', '<', '◀', '«', 'prev'];
+                  for (const btn of buttons) {
+                    const text = (btn.textContent || btn.innerText || '').trim().toLowerCase();
+                    if (arrowChars.some(c => text === c || text.includes(c))) {
+                      btn.click();
+                      return true;
+                    }
+                  }
+                  return false;
+                }, isForward);
+
+                if (arrowClicked) {
+                  clicked = true;
+                  log(`  ✓ Clicked month arrow via text match (step ${i + 1}/${steps})`, 'dim');
+                }
+              }
+
+              if (!clicked) {
+                log(`  ⚠️ Could not find calendar ${isForward ? 'next' : 'prev'} arrow. Using current month.`, 'yellow');
+                navSuccess = false;
+                break;
+              }
+              await wait(1000); // Wait for calendar to update
+            }
+
+            if (!navSuccess) {
+              log(`  ⚠️ Month navigation failed. Proceeding with current month.`, 'yellow');
+            }
+          }
+        }
+
+        // --- Click the target day in the calendar ---
+        log(`  🔍 Looking for day ${dayToSelect} in calendar...`, 'dim');
+
+        const dateSelectionResult = await page.evaluate((targetDayStr) => {
+          const targetDay = parseInt(targetDayStr, 10);
+          if (Number.isNaN(targetDay)) return { success: false, reason: 'Invalid day number' };
+
+          const normalizeCellDay = (el) => {
+            const aria = el.getAttribute('aria-label') || '';
+            const ariaMatch = aria.match(/\b(\d{1,2})\b/);
+            if (ariaMatch) return parseInt(ariaMatch[1], 10);
+
+            const dataDate = el.getAttribute('data-date') || el.getAttribute('data-day');
+            if (dataDate) {
+              const parsed = parseInt(dataDate, 10);
+              if (!isNaN(parsed)) return parsed;
+            }
+
+            const text = (el.textContent || el.innerText || '').trim();
+            const textMatch = text.match(/^\s*(\d{1,2})\s*$/);
+            if (textMatch) return parseInt(textMatch[1], 10);
+
+            return NaN;
+          };
+
+          const isElementDisabled = (el) => {
+            if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
+            const classes = el.className || '';
+            if (classes.includes('disabled') || classes.includes('old') || classes.includes('new')) return true;
+            const style = window.getComputedStyle(el);
+            if (style.pointerEvents === 'none' || style.opacity === '0' || style.visibility === 'hidden') return true;
+            return false;
+          };
+
+          const tryClickElement = (el) => {
+            try {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              el.click();
+              el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+              el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+              el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return true;
+            } catch (err) {
+              return false;
+            }
+          };
+
+          const strategies = [
+            // BrokerBay-specific selectors (AngularJS custom components)
+            ['[class*="bb-calendar"] td', null],
+            ['[class*="bb-calendar"] span', null],
+            ['[class*="bb-calendar"] div', null],
+            ['[class*="bb-calendar"] a', null],
+            ['[class*="bb-appointment"] td', null],
+            ['[class*="appointment-date"] td', null],
+            // Generic calendar selectors
+            ['td.day:not(.disabled):not(.old):not(.new)', 'button'],
+            ['td.day:not(.disabled):not(.old):not(.new)', null],
+            ['button.day:not(.disabled):not(.old):not(.new)', null],
+            ['td[class*="day"]:not([class*="disabled"])', 'button'],
+            ['td[class*="day"]:not([class*="disabled"])', null],
+            ['[role="gridcell"]', 'button'],
+            ['[role="gridcell"]', null],
+            ['td.day', 'button'],
+            ['td.day', null],
+            ['button[class*="day"]', null],
+            ['.calendar-day', 'button'],
+            ['.calendar-day', null]
+          ];
+
+          const debugInfo = { found: [], disabled: [], strategiesChecked: [] };
+
+          for (const [parentSelector, childSelector] of strategies) {
+            const parents = Array.from(document.querySelectorAll(parentSelector));
+            debugInfo.strategiesChecked.push({ selector: parentSelector, matchCount: parents.length });
+
+            for (const parent of parents) {
+              const candidates = childSelector
+                ? Array.from(parent.querySelectorAll(childSelector))
+                : [parent];
+
+              for (const el of candidates) {
+                const cellDay = normalizeCellDay(childSelector ? parent : el);
+
+                if (!Number.isNaN(cellDay) && cellDay === targetDay) {
+                  debugInfo.found.push({
+                    selector: parentSelector + (childSelector ? ' > ' + childSelector : ''),
+                    day: cellDay,
+                    disabled: isElementDisabled(el) || isElementDisabled(parent)
+                  });
+
+                  if (isElementDisabled(el) || isElementDisabled(parent)) {
+                    debugInfo.disabled.push(parentSelector);
+                    continue;
+                  }
+
+                  if (tryClickElement(el)) {
+                    return {
+                      success: true,
+                      day: cellDay,
+                      element: el.tagName,
+                      selector: parentSelector + (childSelector ? ' > ' + childSelector : '')
+                    };
+                  }
+                }
+              }
+            }
+          }
+
+          // NUCLEAR FALLBACK: Scan ALL visible elements in the calendar area
+          // BrokerBay uses custom AngularJS components — target any element whose
+          // text is exactly the day number within the "Step 2" / calendar section
+          const calendarContainers = document.querySelectorAll(
+            '[class*="calendar"], [class*="date"], [class*="appointment"], table, .step-2, [class*="step"]'
+          );
+
+          // Build a set of candidate containers — if none matched, use document.body
+          const containers = calendarContainers.length > 0
+            ? Array.from(calendarContainers)
+            : [document.body];
+
+          for (const container of containers) {
+            // Find all leaf-ish elements (td, span, div, a, button) with just a number as text
+            const allEls = Array.from(container.querySelectorAll('td, th, span, div, a, button, p'));
+            for (const el of allEls) {
+              const text = (el.textContent || el.innerText || '').trim();
+              // Must be exactly the day number (1-2 digits, nothing else)
+              if (!/^\d{1,2}$/.test(text)) continue;
+              const dayNum = parseInt(text, 10);
+              if (dayNum !== targetDay) continue;
+
+              // Skip if the element has too many children (it's a container, not a day cell)
+              if (el.children.length > 3) continue;
+
+              // Skip if not visible
+              const rect = el.getBoundingClientRect();
+              if (rect.width === 0 || rect.height === 0) continue;
+              const style = window.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+
+              // Skip header row elements (Sun, Mon, etc. area — day cells are usually below y=100 of the container)
+              if (isElementDisabled(el)) {
+                debugInfo.found.push({ selector: 'nuclear-fallback', day: dayNum, disabled: true });
+                continue;
+              }
+
+              debugInfo.found.push({ selector: 'nuclear-fallback', day: dayNum, disabled: false, tag: el.tagName });
+
+              if (tryClickElement(el)) {
+                return {
+                  success: true,
+                  day: dayNum,
+                  element: el.tagName,
+                  selector: 'nuclear-fallback (broad DOM scan)'
+                };
+              }
+            }
+          }
+
+          return {
+            success: false,
+            reason: `Date ${targetDay} not found in calendar or all instances were disabled`,
+            debug: debugInfo
+          };
+        }, dayToSelect.toString());
+
+        if (dateSelectionResult.success) {
+          log(`  ✅ Successfully selected date ${dateSelectionResult.day}`, 'green');
+          log(`  📍 Used selector: ${dateSelectionResult.selector}`, 'dim');
+
+          // Poll for time slots to appear (up to 8 seconds)
+          log(`  ⏳ Waiting for time slots to load after date selection...`, 'dim');
+          let timeSlotsLoaded = false;
+          const pollStart = Date.now();
+          while (Date.now() - pollStart < 8000) {
+            const hasSlots = await page.evaluate(() => {
+              const slotSelectors = [
+                'button[class*="time"]:not([disabled])',
+                '.time-slot:not(.disabled)',
+                '[class*="slot"]:not([disabled])'
+              ];
+              for (const sel of slotSelectors) {
+                const slots = document.querySelectorAll(sel);
+                if (slots.length > 0) return true;
+              }
+              return false;
+            });
+            if (hasSlots) {
+              timeSlotsLoaded = true;
+              break;
+            }
+            await wait(500);
+          }
+
+          if (timeSlotsLoaded) {
+            log(`  ✅ Time slots loaded for date ${dayToSelect}`, 'green');
+          } else {
+            log(`  ⚠️ No time slots loaded for date ${dayToSelect}. The listing may have no availability on this day.`, 'yellow');
+            log(`  ⚠️ Proceeding — Step 3 will attempt to find available slots.`, 'yellow');
+          }
+
+          await takeScreenshot(page, '02_date_selected_preferred');
+          logStep(2, `Date ${dayToSelect} selected successfully`, 'success');
+          return true;
+        } else {
+          log(`  ⚠️ Failed to click date ${dayToSelect}: ${dateSelectionResult.reason}`, 'yellow');
+          if (dateSelectionResult.debug?.strategiesChecked?.length > 0) {
+            log(`  📊 Debug: Strategies checked:`, 'dim');
+            dateSelectionResult.debug.strategiesChecked.forEach(s => {
+              if (s.matchCount > 0) log(`    ✓ ${s.selector}: ${s.matchCount} element(s)`, 'dim');
+            });
+            const noMatch = dateSelectionResult.debug.strategiesChecked.filter(s => s.matchCount === 0);
+            if (noMatch.length > 0) log(`    ✗ ${noMatch.length} strategies matched 0 elements`, 'dim');
+          }
+          if (dateSelectionResult.debug?.found.length > 0) {
+            log(`  📊 Debug: Found ${dateSelectionResult.debug.found.length} element(s) for day ${dayToSelect}`, 'dim');
+            dateSelectionResult.debug.found.forEach((item, idx) => {
+              log(`    ${idx + 1}. ${item.selector} (disabled: ${item.disabled}${item.tag ? ', tag: ' + item.tag : ''})`, 'dim');
+            });
+          }
+          log(`  ⚠️ Falling back to automatic date selection...`, 'yellow');
+        }
       }
-      log(`  ⚠️ Falling back to automatic date selection...`, 'yellow');
+    } catch (dateErr) {
+      log(`  ⚠️ Error during preferred date selection: ${dateErr.message}`, 'yellow');
+      log(`  ⚠️ Falling back to default (auto-selected) date. Proceeding...`, 'yellow');
+      await takeScreenshot(page, '02_date_error_fallback');
     }
   }
 
@@ -1893,9 +2029,8 @@ async function selectTimeAndDurationStep(page) {
         } else if (durationInfo.available.length) {
           log(`  ⚠️ Could not apply duration ${durationInfo.selected} minutes`, "yellow");
         }
-        log(`  ⏳ Waiting 30 seconds for duration to apply...`, "dim");
-        await wait(30000);
-        await waitForAutoConfirmButton(page, 20000);
+        log(`  ⏳ Waiting for duration to apply...`, "dim");
+        await wait(5000);
         log(`  ✓ Time slot clicked`, "dim");
         break;
       }
@@ -1921,6 +2056,9 @@ async function submitBooking(page) {
   logStep(4, "Clicking AUTO-CONFIRM button", 'info');
 
   await wait(2000);
+
+  // Wait for AUTO-CONFIRM / Book Showing button to become clickable
+  await waitForAutoConfirmButton(page, 15000);
 
   log(`  Looking for AUTO-CONFIRM button in top right...`, 'dim');
 

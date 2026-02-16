@@ -64,7 +64,7 @@ export async function saveSessionMetadata(metadata) {
 }
 
 // Check if session is valid by testing login status
-export async function isSessionValid(page) {
+export async function isSessionValid(page, skipNavigationIfOnBrokerBay = false) {
     try {
         console.log('🔍 Checking if session is still valid...');
 
@@ -76,7 +76,31 @@ export async function isSessionValid(page) {
             return false;
         }
 
+        // If we're already on a BrokerBay page (not login) and skipNavigation is true,
+        // just verify we're logged in without navigating
+        if (skipNavigationIfOnBrokerBay && currentUrl.includes('edge.brokerbay.com')) {
+            console.log('  ℹ️  Already on BrokerBay page, skipping navigation');
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            const pageContent = await page.content();
+
+            // Check for login indicators
+            const isLoggedOut = pageContent.includes('Sign In') ||
+                pageContent.includes('You have been logged out') ||
+                pageContent.includes('Please log in');
+
+            if (isLoggedOut) {
+                console.log('❌ Session invalid - login required');
+                return false;
+            }
+
+            console.log('✅ Session is valid - already logged in on current page');
+            return true;
+        }
+
         // Navigate to dashboard to verify login
+        console.log('  ℹ️  Navigating to dashboard to verify session...');
         await page.goto('https://edge.brokerbay.com/#/my_business', {
             waitUntil: 'domcontentloaded',
             timeout: 30000
@@ -255,8 +279,8 @@ export async function waitForManualLogin(page, timeout = 300000) {
 }
 
 // Validate session before automation
-export async function validateSessionOrPrompt(page) {
-    const isValid = await isSessionValid(page);
+export async function validateSessionOrPrompt(page, skipIfOnBrokerBay = false) {
+    const isValid = await isSessionValid(page, skipIfOnBrokerBay);
 
     if (!isValid) {
         console.error('\n' + '='.repeat(70));

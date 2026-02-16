@@ -251,6 +251,7 @@ async function clickElementSafely(page, element, description = "element") {
 }
 
 // ==================== STEP 0.7: SEARCH FOR PROPERTY ====================
+// ==================== STEP 0.7: SEARCH FOR PROPERTY ====================
 async function searchForProperty(page, searchQuery) {
   logStep("0.7", "Searching for property on BrokerBay", 'info');
 
@@ -270,18 +271,20 @@ async function searchForProperty(page, searchQuery) {
   ];
 
   let searchFound = false;
+  let searchInput = null;
+
   for (const selector of searchSelectors) {
     try {
-      const searchBox = await page.$(selector);
-      if (searchBox) {
-        await searchBox.click();
-        await searchBox.type(searchQuery, { delay: 100 });
+      searchInput = await page.$(selector);
+      if (searchInput) {
+        // Clear existing input first
+        await searchInput.click({ clickCount: 3 });
+        await searchInput.press('Backspace');
+        await wait(200);
+
+        await searchInput.type(searchQuery, { delay: 100 });
         log(`  ✓ Entered search query`, 'dim');
         searchFound = true;
-
-        // Press Enter to search
-        await page.keyboard.press('Enter');
-        log(`  ✓ Pressed Enter to search`, 'dim');
         break;
       }
     } catch (error) {
@@ -293,8 +296,186 @@ async function searchForProperty(page, searchQuery) {
     throw new Error("Could not find search bar");
   }
 
-  // Wait for search results to actually load (not just a fixed timeout)
-  log(`  ⏳ Waiting for search results to load...`, 'dim');
+  // --- AUTOCOMPLETE / TYPEAHEAD DETECTION ---
+  log(`  ⏳ Waiting for autocomplete dropdown to appear...`, 'dim');
+
+  // Poll for up to 5 seconds for a dropdown item that matches the address
+  const queryParts = searchQuery.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(p => p.length > 0);
+  const streetNumber = queryParts.find(p => /^\d+$/.test(p));
+
+  let autocompleteClicked = false;
+
+  try {
+    // Wait for a visible element that contains the street number (strong signal for a search result)
+    await page.waitForFunction(
+      (streetNum) => {
+        if (!streetNum) return false;
+        // Look in the area below the search bar for matching visible elements
+        const allEls = Array.from(document.querySelectorAll('a, li, div, span'));
+        return allEls.some(el => {
+          if (el.offsetParent === null) return false; // hidden
+          const text = (el.textContent || '').toLowerCase();
+          return text.includes(streetNum) && text.length < 300 && text.length > 10;
+        });
+      },
+      { timeout: 5000 },
+      streetNumber || ''
+    );
+
+    log(`  ✓ Search results appeared in dropdown`, 'dim');
+    await wait(500); // Brief settle time for rendering
+
+    // Now find the best clickable element - prefer links, then smallest matching element
+    const dropdownResult = await page.evaluateHandle((query, streetNum) => {
+      const qParts = query.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(p => p.length > 0);
+
+      // Collect ALL visible elements that contain the street number
+      const allMatching = [];
+      const allEls = Array.from(document.querySelectorAll('a, li, div, span, button'));
+      for (const el of allEls) {
+        if (el.offsetParent === null) continue; // hidden
+        const text = (el.textContent || '').toLowerCase();
+        if (!text.includes(streetNum)) continue;
+        if (text.length > 300 || text.length < 10) continue;
+
+        // Count how many query parts match
+        const matchCount = qParts.filter(p => text.includes(p)).length;
+        if (matchCount < Math.min(2, qParts.length)) continue;
+
+        allMatching.push({ el, text, matchCount, textLen: text.length, tag: el.tagName.toLowerCase() });
+      }
+
+      if (allMatching.length === 0) return null;
+
+      // PRIORITY 1: <a> tags with href containing "listing" (direct link to listing page)
+      const listingLink = allMatching.find(m => m.tag === 'a' && (m.el.getAttribute('href') || '').includes('listing'));
+      if (listingLink) return listingLink.el;
+
+      // PRIORITY 2: <a> tags with any href (clickable links in the dropdown)
+      const anyLink = allMatching.find(m => m.tag === 'a' && m.el.getAttribute('href'));
+      if (anyLink) return anyLink.el;
+
+      // PRIORITY 3: Elements with ng-click (AngularJS click handlers, common in BrokerBay)
+      const ngClick = allMatching.find(m => m.el.hasAttribute('ng-click'));
+      if (ngClick) return ngClick.el;
+
+      // PRIORITY 4: Elements with a click/mousedown listener or role="option" / role="button"
+      const interactive = allMatching.find(m =>
+        m.el.getAttribute('role') === 'option' ||
+        m.el.getAttribute('role') === 'button' ||
+        m.tag === 'li' || m.tag === 'button'
+      );
+      if (interactive) return interactive.el;
+
+      // PRIORITY 5: The smallest (deepest/most specific) matching element
+      // Sort by text length ascending — shorter text = more specific element
+      allMatching.sort((a, b) => a.textLen - b.textLen);
+      return allMatching[0].el;
+
+    }, searchQuery, streetNumber || '');
+
+    if (dropdownResult && dropdownResult.asElement()) {
+      const el = dropdownResult.asElement();
+      const elInfo = await page.evaluate(e => ({
+        text: (e.textContent || '').substring(0, 80),
+        tag: e.tagName.toLowerCase(),
+        href: e.getAttribute('href') || '',
+        ngClick: e.getAttribute('ng-click') || '',
+        role: e.getAttribute('role') || '',
+      }), el);
+
+      log(`  ✓ Detected autocomplete result: "${elInfo.text}..."`, 'dim');
+      log(`    → Element: <${elInfo.tag}>${elInfo.href ? ' href="' + elInfo.href + '"' : ''}${elInfo.ngClick ? ' ng-click="' + elInfo.ngClick.substring(0, 40) + '"' : ''}${elInfo.role ? ' role="' + elInfo.role + '"' : ''}`, 'dim');
+
+      // Click the element
+      await clickElementSafely(page, el, "autocomplete listing result");
+      autocompleteClicked = true;
+
+      // Poll for navigation: wait up to 8 seconds for URL to change or listing UI to appear
+      log(`  ⏳ Waiting for navigation after autocomplete click...`, 'dim');
+      const listingUrlPattern = /\/listing\/[^/]+\/view/i;
+      const navigationSucceeded = await (async () => {
+        const start = Date.now();
+        while (Date.now() - start < 8000) {
+          // Check URL change
+          if (listingUrlPattern.test(page.url())) {
+            log(`  ✓ Navigated to listing page: ${page.url()}`, 'green');
+            return true;
+          }
+          // Check if a "Book Showing" / "Request Showing" button appeared (listing detail view)
+          const hasListingView = await page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button, a[role="button"], [role="button"]'));
+            return buttons.some(b => {
+              const t = (b.innerText || b.textContent || '').toLowerCase();
+              return t.includes('book showing') || t.includes('request showing');
+            });
+          }).catch(() => false);
+          if (hasListingView) {
+            log(`  ✓ Listing detail view detected (Book Showing button found)`, 'green');
+            return true;
+          }
+          await wait(500);
+        }
+        return false;
+      })();
+
+      if (navigationSucceeded) {
+        logStep("0.7", "Search completed — navigated via autocomplete", 'success');
+        return;
+      } else {
+        log(`  ⚠️ Autocomplete click did not trigger navigation. Trying fallbacks...`, 'yellow');
+
+        // Try clicking an <a> link INSIDE the element we found (in case we clicked a wrapper)
+        const innerLink = await el.$('a[href]');
+        if (innerLink) {
+          const innerHref = await page.evaluate(a => a.getAttribute('href'), innerLink);
+          log(`  ↳ Found inner <a> link: ${innerHref}`, 'dim');
+          await clickElementSafely(page, innerLink, "inner listing link");
+          await wait(3000);
+          if (listingUrlPattern.test(page.url())) {
+            log(`  ✓ Navigated via inner link`, 'green');
+            logStep("0.7", "Search completed — navigated via inner link", 'success');
+            return;
+          }
+          // Try direct navigation via the href
+          if (innerHref) {
+            const fullUrl = innerHref.startsWith('http') ? innerHref :
+              innerHref.startsWith('#') ? innerHref :
+                `https://edge.brokerbay.com/${innerHref.replace(/^#?/, '')}`;
+            log(`  ↳ Forcing navigation to: ${fullUrl}`, 'dim');
+            await page.evaluate(h => { window.location.href = h; }, fullUrl);
+            await wait(3000);
+            if (listingUrlPattern.test(page.url())) {
+              log(`  ✓ Navigated via forced href`, 'green');
+              logStep("0.7", "Search completed — navigated via forced href", 'success');
+              return;
+            }
+          }
+        }
+
+        // Dismiss the dropdown before falling through to table search
+        log(`  ↳ Dismissing autocomplete dropdown (Escape)`, 'dim');
+        await page.keyboard.press('Escape');
+        await wait(500);
+      }
+    } else {
+      log(`  ⚠️ No matching autocomplete element found`, 'yellow');
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('timeout')) {
+      log(`  ⚠️ No autocomplete dropdown appeared within 5s`, 'yellow');
+    } else {
+      log(`  ⚠️ Autocomplete check failed: ${err.message}`, 'yellow');
+    }
+  }
+
+  // --- FALLBACK: Press Enter and wait for search results table ---
+  if (searchInput && !autocompleteClicked) {
+    await searchInput.press('Enter');
+    log(`  ✓ Pressed Enter to search (fallback)`, 'dim');
+  }
+
+  log(`  ⏳ Waiting for search results table to load...`, 'dim');
 
   try {
     await page.waitForFunction(
@@ -306,11 +487,11 @@ async function searchForProperty(page, searchQuery) {
         });
         return validRows.length > 0;
       },
-      { timeout: 20000 }
+      { timeout: 10000 }
     );
-    log(`  ✓ Search results loaded`, 'dim');
+    log(`  ✓ Search results table loaded`, 'dim');
   } catch (e) {
-    log(`  ⚠️ Timeout waiting for results, proceeding anyway`, 'yellow');
+    log(`  ⚠️ Timeout waiting for results table, proceeding anyway`, 'yellow');
   }
 
   await wait(2000);
@@ -323,10 +504,90 @@ async function searchForProperty(page, searchQuery) {
 async function selectPropertyFromResults(page, searchQuery) {
   logStep("0.8", "Selecting property from search results", "info");
 
-  await wait(3000);
+  await wait(2000);
 
+  // Check if we are already on the listing page (e.g. from autocomplete click)
   const listingUrlPattern = /\/listing\/[^/]+\/view/i;
-  const searchRoot = searchQuery.toLowerCase().split(",")[0].trim();
+  if (listingUrlPattern.test(page.url())) {
+    log("  ✓ Already on listing page (likely from autocomplete selection)", "green");
+    return page;
+  }
+
+  // --- RE-CHECK: If the autocomplete dropdown is still visible, try clicking the listing link ---
+  try {
+    const streetNum = (searchQuery.match(/\d+/) || [''])[0];
+    const dropdownLink = await page.evaluateHandle((sn) => {
+      if (!sn) return null;
+      // Look for <a> tags that contain the street number and have a listing href
+      const links = Array.from(document.querySelectorAll('a[href*="listing"], a[href*="/listing/"]'));
+      for (const a of links) {
+        if (a.offsetParent === null) continue;
+        const text = (a.textContent || '').toLowerCase();
+        if (text.includes(sn)) return a;
+      }
+      // Also look for any visible <a> with the street number
+      const allLinks = Array.from(document.querySelectorAll('a[href]'));
+      for (const a of allLinks) {
+        if (a.offsetParent === null) continue;
+        const text = (a.textContent || '').toLowerCase();
+        const href = a.getAttribute('href') || '';
+        if (text.includes(sn) && (href.includes('listing') || href.includes('#/'))) return a;
+      }
+      return null;
+    }, streetNum);
+
+    if (dropdownLink && dropdownLink.asElement()) {
+      const linkEl = dropdownLink.asElement();
+      const linkInfo = await page.evaluate(a => ({
+        href: a.getAttribute('href') || '',
+        text: (a.textContent || '').substring(0, 60),
+      }), linkEl);
+      log(`  🔄 Re-detected dropdown listing link: "${linkInfo.text}" → ${linkInfo.href}`, 'dim');
+
+      await clickElementSafely(page, linkEl, "dropdown listing link (re-check)");
+      await wait(3000);
+
+      if (listingUrlPattern.test(page.url())) {
+        log("  ✓ Navigated to listing page via re-checked dropdown link", "green");
+        await wait(CONFIG.pageLoadWait);
+        await takeScreenshot(page, "00_property_page");
+        logStep("0.8", "Property page loaded", "success");
+        return page;
+      }
+
+      // Try forcing navigation via href
+      if (linkInfo.href) {
+        const fullUrl = linkInfo.href.startsWith('http') ? linkInfo.href :
+          linkInfo.href.startsWith('#') ? linkInfo.href :
+            `https://edge.brokerbay.com/${linkInfo.href.replace(/^#?/, '')}`;
+        log(`  ↳ Forcing navigation to: ${fullUrl}`, 'dim');
+        await page.evaluate(h => { window.location.href = h; }, fullUrl);
+        await wait(3000);
+        if (listingUrlPattern.test(page.url())) {
+          log("  ✓ Navigated via forced href from dropdown link", "green");
+          await wait(CONFIG.pageLoadWait);
+          await takeScreenshot(page, "00_property_page");
+          logStep("0.8", "Property page loaded", "success");
+          return page;
+        }
+      }
+
+      // Dismiss the stale dropdown
+      log("  ↳ Dismissing stale autocomplete dropdown", 'dim');
+      await page.keyboard.press('Escape');
+      await wait(500);
+    }
+  } catch (err) {
+    log(`  ⚠️ Dropdown re-check failed: ${err.message}`, 'yellow');
+  }
+
+  const queryParts = searchQuery.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '') // remove special chars
+    .split(/\s+/)
+    .filter(p => p.length > 0);
+
+  // We expect at least the street number to be present in a valid match
+  const streetNumber = queryParts.find(p => /^\d+$/.test(p));
 
   const rowSelectors = [
     "table tbody tr",
@@ -345,51 +606,61 @@ async function selectPropertyFromResults(page, searchQuery) {
 
     log(`  Found ${rows.length} rows with selector "${selector}"`, "dim");
 
-    // Filter out empty/invalid rows
-    const validRows = [];
+    // Filter out empty/invalid rows and score them
+    const scoredRows = [];
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
-        const text = await page.evaluate(el => el.textContent || "", row);
-        // Skip rows with very little content (likely headers or empty states)
-        if (!text || text.trim().length < 30) continue;
-        validRows.push({ row, text, index: i });
+        const textRaw = await page.evaluate(el => el.textContent || "", row);
+        const text = textRaw.toLowerCase();
+
+        // Skip rows with very little content
+        if (!textRaw || textRaw.trim().length < 30) continue;
+
+        // Scoring Logic:
+        // 1. Must contain street number (if one exists in query)
+        if (streetNumber && !text.includes(streetNumber)) {
+          continue;
+        }
+
+        // 2. Count matched tokens
+        const matchedTokens = queryParts.filter(part => text.includes(part));
+        const score = matchedTokens.length;
+
+        if (score > 0) {
+          scoredRows.push({ row, text: textRaw, index: i, score });
+        }
       } catch {
         continue;
       }
     }
 
-    if (validRows.length === 0) {
-      log(`  ⚠️ Found ${rows.length} rows but none contain valid listing data`, "yellow");
+    if (scoredRows.length === 0) {
+      log(`  ⚠️ Found ${rows.length} rows but none matched the address criteria (Street Number: ${streetNumber || 'N/A'})`, "yellow");
       continue;
     }
 
-    log(`  ✓ Found ${validRows.length} valid listing rows`, "dim");
+    // Sort by score descending
+    scoredRows.sort((a, b) => b.score - a.score);
 
-    // Try to find exact match
-    for (const { row, text, index } of validRows) {
-      const lower = text.toLowerCase();
-      if (lower.includes(searchRoot)) {
-        targetRow = row;
-        targetRowInfo = { selector, index, text };
-        log("  ✓ Found matching row for property search", "green");
-        break;
-      }
+    // Pick top result if it has a decent match
+    const bestMatch = scoredRows[0];
+
+    // Safety check: ensure we didn't just match "Drive" matches "Drive"
+    if (bestMatch.score >= Math.min(2, queryParts.length)) {
+      targetRow = bestMatch.row;
+      targetRowInfo = { selector, index: bestMatch.index, text: bestMatch.text };
+      log(`  ✓ Found matching row (Score: ${bestMatch.score}/${queryParts.length}): "${bestMatch.text.substring(0, 50)}..."`, "green");
+      break;
+    } else {
+      log(`  ⚠️ Best match score low (${bestMatch.score}). Text: "${bestMatch.text.substring(0, 50)}..."`, "yellow");
     }
-
-    // If we didn't find an exact match, fall back to the first valid row
-    if (!targetRow && validRows.length) {
-      targetRow = validRows[0].row;
-      targetRowInfo = { selector, index: validRows[0].index, text: validRows[0].text };
-      log("  ⚠️ No exact match found. Falling back to first valid search result row.", "yellow");
-    }
-
-    if (targetRow) break;
   }
 
   if (!targetRowInfo) {
-    await takeScreenshot(page, "00_no_search_rows_found");
-    throw new Error("Could not find property in search results (no valid rows found). This usually means the search returned no results or the page did not load properly. Check screenshot: 00_no_search_rows_found*.png");
+    await takeScreenshot(page, "00_no_search_match");
+    // Explicitly FAIL rather than clicking a random row
+    throw new Error(`Could not find property "${searchQuery}" in search results. Best attempt failed. Check screenshot 00_no_search_match.png`);
   }
 
   const beforeUrl = page.url();
@@ -1953,13 +2224,15 @@ async function autoBookShowing() {
       });
 
       if (brokerBayPage) {
-        log(`  ✓ Found existing BrokerBay tab: ${brokerBayPage.url()}`, 'green');
+        log(`  ✅ Found existing BrokerBay tab: ${brokerBayPage.url()}`, 'green');
+        log(`  ✅ Reusing authenticated session - validation will be skipped`, 'green');
         page = brokerBayPage;
         reusedTab = true;
 
         // Bring it to front
         try {
           await page.bringToFront();
+          log(`  ✓ Brought tab to front`, 'dim');
         } catch (e) {
           log(`  ⚠️ Could not bring tab to front: ${e.message}`, 'dim');
         }
@@ -1976,23 +2249,29 @@ async function autoBookShowing() {
     await page.setDefaultNavigationTimeout(CONFIG.navigationTimeout);
 
     // Validate existing session (no login needed with MFA)
-    // Validate existing session (no login needed with MFA)
-    logStep("0.5", "Validating existing session", 'info');
-
-    // Only navigate if we didn't reuse a tab (or if the reused tab is on a different page)
-    if (!reusedTab || !page.url().includes('my_business')) {
-      await page.goto(BROKERBAY_DASHBOARD, {
-        waitUntil: 'domcontentloaded',
-        timeout: CONFIG.navigationTimeout
-      });
-      await wait(3000);
+    // Skip validation if we reused an authenticated tab - it's already verified
+    if (reusedTab) {
+      logStep("0.5", "Skipping session validation - using existing authenticated tab", 'success');
+      log(`  ✓ Tab already authenticated at: ${page.url()}`, 'dim');
+      log(`  ✓ Proceeding directly to booking flow`, 'dim');
     } else {
-      log(`  ✓ Already on dashboard/listing page`, 'dim');
-    }
+      logStep("0.5", "Validating existing session", 'info');
 
-    // Check if session is still valid
-    await validateSessionOrPrompt(page);
-    logStep("0.5", "Session validated - already logged in", 'success');
+      // Navigate to dashboard if needed
+      if (!page.url().includes('brokerbay.com')) {
+        await page.goto(BROKERBAY_DASHBOARD, {
+          waitUntil: 'domcontentloaded',
+          timeout: CONFIG.navigationTimeout
+        });
+        await wait(3000);
+      } else {
+        log(`  ✓ Already on BrokerBay page`, 'dim');
+      }
+
+      // Check if session is still valid (skip navigation if already on BrokerBay)
+      await validateSessionOrPrompt(page, true);
+      logStep("0.5", "Session validated - already logged in", 'success');
+    }
 
     // Wait for dashboard to fully load
     logStep("0.6", "Waiting for dashboard to load", 'info');

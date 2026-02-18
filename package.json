@@ -16,6 +16,7 @@
     "fetch:addresses": "node fetch-property-addresses.js",
     "show:tables": "node show-schedules-and-properties.js",
     "auto-book": "node auto-book-enhanced.js",
+    "cancel-showings": "node auto-cancel-showings.js",
     "docker:build": "docker-compose build",
     "docker:up": "docker-compose up",
     "docker:down": "docker-compose down",

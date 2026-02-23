@@ -8,8 +8,16 @@ if [ ! -f /app/src/data/data.db ]; then
     node init-database.js || echo "⚠️ Database initialization failed, but continuing..."
 fi
 
+# Start D-Bus for Chromium stability in containers
+if command -v dbus-daemon &> /dev/null; then
+    mkdir -p /var/run/dbus
+    dbus-daemon --system --fork 2>/dev/null || true
+    echo "🔌 D-Bus started for Chromium stability"
+fi
+
 # Start the auto-booking worker in the background
-echo "🤖 Starting event-driven auto-booking worker..."
+# (v2: uses in-process booking + auto-cancel sweep via shared headless Chromium)
+echo "🤖 Starting event-driven auto-booking worker (v2)..."
 node auto-booking-worker.js &
 WORKER_PID=$!
 
@@ -35,4 +43,3 @@ trap shutdown SIGTERM SIGINT
 
 # Wait for both processes
 wait $SERVER_PID $WORKER_PID
-

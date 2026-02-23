@@ -42,40 +42,55 @@ async function getExecutablePath() {
   return undefined;
 }
 
-// User profile configuration
-const USER_PROFILE = {
-  name: process.env.USER_NAME || "NAHEED VALYANI",
-  email: process.env.USER_EMAIL || "naheed.val@gmail.com",
-  organization: process.env.USER_ORGANIZATION || "HOMELIFE/YORKLAND REAL ESTATE LTD.",
-  showingType: process.env.SHOWING_TYPE || "Buyer/Broker",
-  preferredDuration: parseInt(process.env.PREFERRED_DURATION || "60"),
-  notes: process.env.BOOKING_NOTES || "",
-  autoConfirmOnly: process.env.AUTO_CONFIRM_ONLY === "true"
-};
-
-// ==================== CLI ARGUMENT PARSING ====================
-const args = process.argv.slice(2);
-let propertyAddress = args[0];
-let preferredTimeArg = args[1] || process.env.PREFERRED_TIME || "";
-let preferredDateArg = args[2] || process.env.PREFERRED_DATE || "";
-let preferredDurationArg = args[3] || process.env.PREFERRED_DURATION || "";
-
-if (!propertyAddress) {
-  console.error("\n❌ Error: Please provide a property address to search");
-  console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time] [preferred_date] [preferred_duration]");
-  console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM' '15' '45'\n");
-  console.log("The script will:");
-  console.log("  1. Search for the property on BrokerBay");
-  console.log("  2. Select it from search results");
-  console.log("  3. Click 'Book Showing' button");
-  console.log("  4. Complete the booking form (time + duration)");
-  console.log("  5. Click 'AUTO-CONFIRM' to finalize\n");
-  process.exit(1);
+// User profile configuration (defaults; overridden by CLI or runBookingFlow params)
+function getUserProfile(overrides = {}) {
+  return {
+    name: overrides.name || process.env.USER_NAME || "NAHEED VALYANI",
+    email: overrides.email || process.env.USER_EMAIL || "naheed.val@gmail.com",
+    organization: overrides.organization || process.env.USER_ORGANIZATION || "HOMELIFE/YORKLAND REAL ESTATE LTD.",
+    showingType: overrides.showingType || process.env.SHOWING_TYPE || "Buyer/Broker",
+    preferredDuration: overrides.preferredDuration || parseInt(process.env.PREFERRED_DURATION || "60"),
+    notes: overrides.notes || process.env.BOOKING_NOTES || "",
+    autoConfirmOnly: overrides.autoConfirmOnly !== undefined ? overrides.autoConfirmOnly : process.env.AUTO_CONFIRM_ONLY === "true"
+  };
 }
 
-const parsedPreferredDuration = parseInt(preferredDurationArg, 10);
-if (!Number.isNaN(parsedPreferredDuration)) {
-  USER_PROFILE.preferredDuration = parsedPreferredDuration;
+// Module-level USER_PROFILE (used by internal step functions)
+let USER_PROFILE = getUserProfile();
+
+// ==================== CLI ARGUMENT PARSING ====================
+// Only parse CLI args and exit when run directly (not when imported)
+const _isMainModule = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/').split('/').pop());
+
+let propertyAddress = '';
+let preferredTimeArg = '';
+let preferredDateArg = '';
+let preferredDurationArg = '';
+
+if (_isMainModule) {
+  const args = process.argv.slice(2);
+  propertyAddress = args[0];
+  preferredTimeArg = args[1] || process.env.PREFERRED_TIME || "";
+  preferredDateArg = args[2] || process.env.PREFERRED_DATE || "";
+  preferredDurationArg = args[3] || process.env.PREFERRED_DURATION || "";
+
+  if (!propertyAddress) {
+    console.error("\n❌ Error: Please provide a property address to search");
+    console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time] [preferred_date] [preferred_duration]");
+    console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM' '15' '45'\n");
+    console.log("The script will:");
+    console.log("  1. Search for the property on BrokerBay");
+    console.log("  2. Select it from search results");
+    console.log("  3. Click 'Book Showing' button");
+    console.log("  4. Complete the booking form (time + duration)");
+    console.log("  5. Click 'AUTO-CONFIRM' to finalize\n");
+    process.exit(1);
+  }
+
+  const parsedPreferredDuration = parseInt(preferredDurationArg, 10);
+  if (!Number.isNaN(parsedPreferredDuration)) {
+    USER_PROFILE.preferredDuration = parsedPreferredDuration;
+  }
 }
 
 const BROKERBAY_DASHBOARD = "https://edge.brokerbay.com/#/listing/list/brokerage";
@@ -2535,6 +2550,162 @@ async function autoBookShowing() {
   return bookingResult;
 }
 
-// ==================== RUN THE SCRIPT ====================
-autoBookShowing().catch(console.error);
+// ==================== EXPORTED API FOR WORKER ====================
+/**
+ * Run a booking flow using a pre-existing browser instance.
+ * This is the main entry point when called from the worker (not CLI).
+ *
+ * @param {import('puppeteer').Browser} browser - An already-connected Puppeteer browser
+ * @param {Object} params
+ * @param {string} params.address - Property address to search and book
+ * @param {string} [params.preferredTime='8:00 PM'] - Preferred booking time
+ * @param {string} [params.preferredDate=''] - Preferred date (YYYY-MM-DD or day number)
+ * @param {number} [params.preferredDuration=60] - Preferred duration in minutes
+ * @returns {Promise<{success: boolean, bookingId: number|null, error: string|null}>}
+ */
+export async function runBookingFlow(browser, params = {}) {
+  const {
+    address,
+    preferredTime = '8:00 PM',
+    preferredDate = '',
+    preferredDuration = 60
+  } = params;
 
+  if (!address) {
+    return { success: false, bookingId: null, error: 'No address provided' };
+  }
+
+  // Set module-level USER_PROFILE with any overrides
+  USER_PROFILE = getUserProfile({ preferredDuration });
+
+  let bookingResult = { success: false, error: null, bookingId: null };
+  let detectedListingId = 'Unknown';
+  let bookingPageUrl = '';
+
+  try {
+    log(`\n${'='.repeat(70)}`, 'cyan');
+    log(`  🤖 [BOOKING] Auto-booking: ${address}`, 'cyan');
+    log(`${'='.repeat(70)}`, 'cyan');
+    log(`  User: ${USER_PROFILE.name} (${USER_PROFILE.email})`, 'dim');
+    log(`  Preferred Time: ${preferredTime}`, 'dim');
+    log(`  Preferred Date: ${preferredDate || 'auto'}`, 'dim');
+    log(`  Preferred Duration: ${preferredDuration} min`, 'dim');
+
+    // Get or create a page from the existing browser
+    let page;
+    let reusedTab = false;
+
+    if (browser.isConnectedToExisting) {
+      const pages = await browser.pages();
+      const brokerBayPage = pages.find(p => {
+        const url = p.url();
+        return url.includes('brokerbay.com') && !url.includes('auth.brokerbay.com/login');
+      });
+
+      if (brokerBayPage) {
+        log(`  ✅ Reusing existing BrokerBay tab: ${brokerBayPage.url()}`, 'green');
+        page = brokerBayPage;
+        reusedTab = true;
+        try { await page.bringToFront(); } catch { }
+      } else {
+        page = await browser.newPage();
+      }
+    } else {
+      // For a Puppeteer-launched browser, reuse first page or create new
+      const pages = await browser.pages();
+      page = pages.length > 0 ? pages[0] : await browser.newPage();
+    }
+
+    await page.setViewport(CONFIG.viewport);
+    await page.setDefaultTimeout(CONFIG.timeout);
+    await page.setDefaultNavigationTimeout(CONFIG.navigationTimeout);
+
+    // Validate session
+    if (reusedTab) {
+      log(`  ✓ Using authenticated tab — skipping validation`, 'dim');
+    } else {
+      if (!page.url().includes('brokerbay.com')) {
+        await page.goto(BROKERBAY_DASHBOARD, {
+          waitUntil: 'domcontentloaded',
+          timeout: CONFIG.navigationTimeout
+        });
+        await wait(3000);
+      }
+      await validateSessionOrPrompt(page, true);
+    }
+
+    await wait(CONFIG.pageLoadWait);
+
+    // Run the booking steps
+    await searchForProperty(page, address);
+    const listingPage = await selectPropertyFromResults(page, address);
+
+    const listingIdFromUrl = extractListingIdFromUrl(listingPage);
+    if (listingIdFromUrl) {
+      detectedListingId = listingIdFromUrl;
+      log(`  ✓ Listing ID: ${detectedListingId}`, 'dim');
+    }
+
+    await clickBookShowingButton(listingPage);
+    bookingPageUrl = listingPage.url();
+
+    await fillProfileStep(listingPage);
+    await selectDateStep(listingPage, preferredDate);
+    const timeInfo = await selectTimeAndDurationStep(listingPage);
+    const submitResult = await submitBooking(listingPage);
+    const confirmation = await verifyConfirmation(listingPage);
+    const autoConfirmed = Boolean(submitResult.isAutoConfirm || timeInfo.autoConfirm);
+    const bookingStatus = confirmation.isConfirmed || autoConfirmed ? 'Confirmed' : 'Pending';
+
+    const bookingDate = await page.evaluate(() => {
+      const sel = document.querySelector('.selected, .active, [class*="selected"]');
+      return sel ? sel.textContent.trim() : new Date().toLocaleDateString();
+    });
+
+    const bookingData = {
+      listing_id: detectedListingId,
+      property_address: address,
+      booking_date: bookingDate || new Date().toISOString().split('T')[0],
+      booking_time: timeInfo.time,
+      duration: timeInfo.duration,
+      user_name: USER_PROFILE.name,
+      user_email: USER_PROFILE.email,
+      organization: USER_PROFILE.organization,
+      showing_type: USER_PROFILE.showingType,
+      status: bookingStatus,
+      auto_confirmed: autoConfirmed,
+      booking_url: bookingPageUrl || page.url(),
+      screenshot_path: `${CONFIG.screenshotDir}/05_confirmation_*.png`,
+      confirmation_message: confirmation.message
+    };
+
+    const bookingId = saveBooking(bookingData);
+
+    if (bookingId) {
+      log(`  ✅ [BOOKING] Saved (ID: ${bookingId}) — ${bookingStatus}`, 'green');
+      bookingResult = { success: true, bookingId, error: null };
+    } else {
+      log(`  ❌ [BOOKING] Failed to save to database`, 'red');
+      bookingResult.error = 'Database save failed';
+    }
+
+  } catch (error) {
+    log(`  ❌ [BOOKING] Error: ${error.message}`, 'red');
+    bookingResult.error = error.message;
+
+    try {
+      const pages = await browser.pages();
+      if (pages.length > 0) await takeScreenshot(pages[0], 'worker_booking_error');
+    } catch { }
+  }
+
+  // NOTE: We do NOT close the browser here — the worker owns it
+  return bookingResult;
+}
+
+export { setupDatabase, saveBooking, CONFIG, getUserProfile };
+
+// ==================== RUN AS CLI ====================
+if (_isMainModule) {
+  autoBookShowing().catch(console.error);
+}

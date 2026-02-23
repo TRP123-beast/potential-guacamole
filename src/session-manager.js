@@ -197,9 +197,8 @@ export async function launchWithSession(options = {}) {
             ...options
         };
 
-        // If we are launching, we might want to launch WITH remote debugging enabled
-        // so we can connect to it later if needed?
-        // launchOptions.args.push(`--remote-debugging-port=${debugPort}`);
+        // Enable remote debugging so we can reconnect to this instance later
+        launchOptions.args.push(`--remote-debugging-port=${debugPort}`);
 
         const browser = await puppeteer.launch(launchOptions);
         console.log('✅ Browser launched with persistent session');
@@ -298,6 +297,60 @@ export async function validateSessionOrPrompt(page, skipIfOnBrokerBay = false) {
     return true;
 }
 
+// ==================== SHARED BROWSER SINGLETON ====================
+let _sharedBrowser = null;
+
+/**
+ * Get (or create) a shared browser instance.
+ * Use this from the worker to hold a single long-lived browser.
+ * Tries CDP connection first, then launches a new headless instance.
+ *
+ * @param {Object} [options] - options forwarded to launchWithSession
+ * @returns {Promise<import('puppeteer').Browser>}
+ */
+export async function getSharedBrowser(options = {}) {
+    if (_sharedBrowser && isBrowserAlive()) {
+        return _sharedBrowser;
+    }
+
+    console.log('🌐 [SESSION] Initializing shared browser instance...');
+    _sharedBrowser = await launchWithSession(options);
+    console.log('✅ [SESSION] Shared browser ready');
+    return _sharedBrowser;
+}
+
+/**
+ * Check whether the shared browser is still alive and connected.
+ * @returns {boolean}
+ */
+export function isBrowserAlive() {
+    try {
+        return _sharedBrowser && _sharedBrowser.isConnected();
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Close the shared browser cleanly.
+ */
+export async function closeSharedBrowser() {
+    if (!_sharedBrowser) return;
+    try {
+        if (_sharedBrowser.isConnectedToExisting) {
+            console.log('🔌 [SESSION] Disconnecting from existing browser (not closing)');
+            _sharedBrowser.disconnect();
+        } else {
+            console.log('🛑 [SESSION] Closing shared browser');
+            await _sharedBrowser.close();
+        }
+    } catch (err) {
+        console.error(`⚠️  [SESSION] Error closing browser: ${err.message}`);
+    } finally {
+        _sharedBrowser = null;
+    }
+}
+
 export default {
     getSessionPath,
     getSessionMetadata,
@@ -305,5 +358,8 @@ export default {
     isSessionValid,
     launchWithSession,
     waitForManualLogin,
-    validateSessionOrPrompt
+    validateSessionOrPrompt,
+    getSharedBrowser,
+    isBrowserAlive,
+    closeSharedBrowser
 };

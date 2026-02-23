@@ -73,6 +73,9 @@ const CONFIG = {
 
 const DRY_RUN = process.argv.includes("--dry-run");
 
+// Only run as CLI when executed directly (not when imported)
+const _isMainModule = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/').split('/').pop());
+
 // ========================== ANSI COLORS ==========================
 const C = {
     reset: "\x1b[0m",
@@ -1087,8 +1090,205 @@ async function main() {
     }
 }
 
-// ========================== ENTRY POINT ==========================
-main().catch((err) => {
-    console.error("\n💥 Unhandled error:", err);
-    process.exit(1);
-});
+// ========================== EXPORTED API FOR WORKER ==========================
+
+/**
+ * Run a cancellation sweep using a pre-existing browser instance.
+ * This is the main entry point when called from the worker (not CLI).
+ *
+ * @param {import('puppeteer').Browser} browser - An already-connected Puppeteer browser
+ * @param {Object} [options]
+ * @param {boolean} [options.dryRun=false] - If true, scan but don't cancel
+ * @returns {Promise<{cancelled: number, failed: number, scanned: number, errors: string[]}>}
+ */
+export async function runCancellationSweep(browser, options = {}) {
+    const { dryRun = false } = options;
+    let page = null;
+
+    const stats = {
+        scanned: 0,
+        cancelled: 0,
+        skipped: 0,
+        failed: 0,
+        errors: [],
+    };
+
+    try {
+        log(`\n${'═'.repeat(70)}`, 'bright');
+        log('  🚫  [CANCEL] Auto-Cancellation Sweep Starting', 'bright');
+        log(`${'═'.repeat(70)}`, 'bright');
+        if (dryRun) {
+            log('  ⚡ DRY RUN MODE – no showings will actually be cancelled', 'yellow');
+        }
+
+        // Get or create a page from the existing browser
+        let reusedTab = false;
+
+        if (browser.isConnectedToExisting) {
+            const allPages = await browser.pages();
+            const brokerBayPage = allPages.find(p => {
+                const url = p.url();
+                return url.includes('brokerbay.com') && !url.includes('auth.brokerbay.com/login');
+            });
+
+            if (brokerBayPage) {
+                log(`  ✅ Reusing existing BrokerBay tab: ${brokerBayPage.url()}`, 'green');
+                page = brokerBayPage;
+                reusedTab = true;
+                try { await page.bringToFront(); } catch { }
+            } else {
+                page = await browser.newPage();
+            }
+        } else {
+            const allPages = await browser.pages();
+            page = allPages.length > 0 ? allPages[0] : await browser.newPage();
+        }
+
+        await page.setViewport(CONFIG.viewport);
+
+        // Validate session
+        if (reusedTab) {
+            log(`  ✓ Using authenticated tab — skipping validation`, 'dim');
+        } else {
+            if (!page.url().includes('brokerbay.com')) {
+                await page.goto('https://edge.brokerbay.com/#/my_business', {
+                    waitUntil: 'domcontentloaded',
+                    timeout: CONFIG.navigationTimeout,
+                });
+                await wait(3000);
+            }
+            await validateSessionOrPrompt(page, true);
+        }
+
+        // Navigate to showings
+        await navigateToShowings(page);
+
+        // Scan & Cancel Loop
+        log('  🔍 [CANCEL] Scanning for showings to cancel...', 'cyan');
+        let passNumber = 0;
+        let keepGoing = true;
+
+        while (keepGoing) {
+            passNumber++;
+            log(`\n${'─'.repeat(50)}`, 'dim');
+            log(`  🔄 [CANCEL] Pass #${passNumber}`, 'cyan');
+
+            if (passNumber > 1) {
+                await navigateToShowings(page);
+            }
+
+            const paginationPages = await getPaginationPages(page);
+            let foundAnyThisPass = false;
+
+            for (const pageNum of paginationPages) {
+                if (pageNum > 1) {
+                    await goToPage(page, pageNum);
+                    await wait(CONFIG.mediumWait);
+                }
+
+                const showings = await scanForTargetedShowings(page);
+                stats.scanned += showings.length;
+
+                if (showings.length === 0) {
+                    log(`  📄 Page ${pageNum}: No targeted showings`, 'dim');
+                    continue;
+                }
+
+                log(`  📄 Page ${pageNum}: Found ${showings.length} targeted showing(s)`, 'cyan');
+
+                for (const showing of showings) {
+                    log(`\n  ┌─ ${showing.address} [${showing.tag}]`, 'white');
+
+                    if (dryRun) {
+                        log('  └─ [DRY RUN] Would cancel', 'yellow');
+                        stats.skipped++;
+                        continue;
+                    }
+
+                    foundAnyThisPass = true;
+
+                    if (pageNum > 1) {
+                        await navigateToShowings(page);
+                        await goToPage(page, pageNum);
+                        await wait(CONFIG.mediumWait);
+                    }
+
+                    const freshShowings = await scanForTargetedShowings(page);
+                    if (freshShowings.length === 0) {
+                        log('  └─ ⚠️ No more targeted showings after re-scan', 'yellow');
+                        break;
+                    }
+
+                    const clickResult = await clickShowingByIndex(page, { ...freshShowings[0], index: 0 });
+                    if (!clickResult) {
+                        stats.failed++;
+                        stats.errors.push(`Failed to click: ${showing.address}`);
+                        continue;
+                    }
+
+                    await wait(CONFIG.mediumWait);
+                    const success = await performCancellation(page, showing);
+
+                    if (success) {
+                        stats.cancelled++;
+                        log(`  └─ ✅ Cancelled (${stats.cancelled} total)`, 'green');
+                    } else {
+                        stats.failed++;
+                        stats.errors.push(`Failed to cancel: ${showing.address}`);
+                        log('  └─ ❌ Cancellation failed', 'red');
+                    }
+
+                    await wait(CONFIG.shortWait);
+                    break; // Restart from page 1
+                }
+
+                if (foundAnyThisPass) break;
+            }
+
+            if (dryRun || !foundAnyThisPass) {
+                keepGoing = false;
+            }
+        }
+
+        // Summary
+        log(`\n${'═'.repeat(70)}`, 'bright');
+        log('  📊  [CANCEL] SWEEP SUMMARY', 'bright');
+        log(`${'═'.repeat(70)}`, 'bright');
+        log(`  Scanned : ${stats.scanned}`, 'white');
+        log(`  Cancelled: ${stats.cancelled}`, 'green');
+        log(`  Failed  : ${stats.failed}`, stats.failed > 0 ? 'red' : 'white');
+        log(`  Skipped : ${stats.skipped}`, stats.skipped > 0 ? 'yellow' : 'white');
+        if (stats.errors.length > 0) {
+            stats.errors.forEach((e, i) => log(`    ${i + 1}. ${e}`, 'red'));
+        }
+        log(`${'═'.repeat(70)}\n`, 'bright');
+
+    } catch (error) {
+        log(`  ❌ [CANCEL] Sweep error: ${error.message}`, 'red');
+        stats.errors.push(`Fatal: ${error.message}`);
+        if (page) {
+            await takeScreenshot(page, 'cancel_sweep_error');
+        }
+    }
+
+    // NOTE: We do NOT close the browser — the worker owns it
+    return stats;
+}
+
+export {
+    navigateToShowings,
+    scanForTargetedShowings,
+    performCancellation,
+    getPaginationPages,
+    goToPage,
+    clickShowingByIndex,
+    CONFIG as CANCEL_CONFIG
+};
+
+// ========================== CLI ENTRY POINT ==========================
+if (_isMainModule) {
+    main().catch((err) => {
+        console.error('\n💥 Unhandled error:', err);
+        process.exit(1);
+    });
+}

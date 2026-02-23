@@ -64,7 +64,7 @@ export async function saveSessionMetadata(metadata) {
 }
 
 // Check if session is valid by testing login status
-export async function isSessionValid(page) {
+export async function isSessionValid(page, skipNavigationIfOnBrokerBay = false) {
     try {
         console.log('🔍 Checking if session is still valid...');
 
@@ -76,7 +76,31 @@ export async function isSessionValid(page) {
             return false;
         }
 
+        // If we're already on a BrokerBay page (not login) and skipNavigation is true,
+        // just verify we're logged in without navigating
+        if (skipNavigationIfOnBrokerBay && currentUrl.includes('edge.brokerbay.com')) {
+            console.log('  ℹ️  Already on BrokerBay page, skipping navigation');
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            const pageContent = await page.content();
+
+            // Check for login indicators
+            const isLoggedOut = pageContent.includes('Sign In') ||
+                pageContent.includes('You have been logged out') ||
+                pageContent.includes('Please log in');
+
+            if (isLoggedOut) {
+                console.log('❌ Session invalid - login required');
+                return false;
+            }
+
+            console.log('✅ Session is valid - already logged in on current page');
+            return true;
+        }
+
         // Navigate to dashboard to verify login
+        console.log('  ℹ️  Navigating to dashboard to verify session...');
         await page.goto('https://edge.brokerbay.com/#/my_business', {
             waitUntil: 'domcontentloaded',
             timeout: 30000
@@ -109,6 +133,35 @@ export async function isSessionValid(page) {
 
 // Launch browser with persistent session
 export async function launchWithSession(options = {}) {
+    const debugPort = process.env.BROWSER_DEBUG_PORT || 9222;
+    const debugUrl = `http://127.0.0.1:${debugPort}/json/version`;
+
+    // Try to connect to existing browser first
+    try {
+        console.log(`🔍 Checking for existing browser on port ${debugPort}...`);
+        const { data } = await import("axios").then(m => m.default.get(debugUrl));
+
+        if (data && data.webSocketDebuggerUrl) {
+            console.log(`✅ Found existing browser! Connecting to: ${data.webSocketDebuggerUrl}`);
+
+            const browser = await puppeteer.connect({
+                browserWSEndpoint: data.webSocketDebuggerUrl,
+                defaultViewport: options.defaultViewport || { width: 1920, height: 1080 },
+                ...options
+            });
+
+            // Mark as existing session so we don't close it completely later
+            browser.isConnectedToExisting = true;
+
+            console.log('✅ Successfully connected to existing browser session');
+            return browser;
+        }
+    } catch (error) {
+        console.log(`ℹ️  No existing browser found on port ${debugPort} (or connection failed). Launching new instance...`);
+        console.log(`   Error details: ${error.message}`);
+    }
+
+    // Fallback to launching new instance
     try {
         const sessionDir = getSessionPath();
 
@@ -143,6 +196,9 @@ export async function launchWithSession(options = {}) {
             ],
             ...options
         };
+
+        // Enable remote debugging so we can reconnect to this instance later
+        launchOptions.args.push(`--remote-debugging-port=${debugPort}`);
 
         const browser = await puppeteer.launch(launchOptions);
         console.log('✅ Browser launched with persistent session');
@@ -222,8 +278,8 @@ export async function waitForManualLogin(page, timeout = 300000) {
 }
 
 // Validate session before automation
-export async function validateSessionOrPrompt(page) {
-    const isValid = await isSessionValid(page);
+export async function validateSessionOrPrompt(page, skipIfOnBrokerBay = false) {
+    const isValid = await isSessionValid(page, skipIfOnBrokerBay);
 
     if (!isValid) {
         console.error('\n' + '='.repeat(70));
@@ -241,6 +297,60 @@ export async function validateSessionOrPrompt(page) {
     return true;
 }
 
+// ==================== SHARED BROWSER SINGLETON ====================
+let _sharedBrowser = null;
+
+/**
+ * Get (or create) a shared browser instance.
+ * Use this from the worker to hold a single long-lived browser.
+ * Tries CDP connection first, then launches a new headless instance.
+ *
+ * @param {Object} [options] - options forwarded to launchWithSession
+ * @returns {Promise<import('puppeteer').Browser>}
+ */
+export async function getSharedBrowser(options = {}) {
+    if (_sharedBrowser && isBrowserAlive()) {
+        return _sharedBrowser;
+    }
+
+    console.log('🌐 [SESSION] Initializing shared browser instance...');
+    _sharedBrowser = await launchWithSession(options);
+    console.log('✅ [SESSION] Shared browser ready');
+    return _sharedBrowser;
+}
+
+/**
+ * Check whether the shared browser is still alive and connected.
+ * @returns {boolean}
+ */
+export function isBrowserAlive() {
+    try {
+        return _sharedBrowser && _sharedBrowser.isConnected();
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Close the shared browser cleanly.
+ */
+export async function closeSharedBrowser() {
+    if (!_sharedBrowser) return;
+    try {
+        if (_sharedBrowser.isConnectedToExisting) {
+            console.log('🔌 [SESSION] Disconnecting from existing browser (not closing)');
+            _sharedBrowser.disconnect();
+        } else {
+            console.log('🛑 [SESSION] Closing shared browser');
+            await _sharedBrowser.close();
+        }
+    } catch (err) {
+        console.error(`⚠️  [SESSION] Error closing browser: ${err.message}`);
+    } finally {
+        _sharedBrowser = null;
+    }
+}
+
 export default {
     getSessionPath,
     getSessionMetadata,
@@ -248,5 +358,8 @@ export default {
     isSessionValid,
     launchWithSession,
     waitForManualLogin,
-    validateSessionOrPrompt
+    validateSessionOrPrompt,
+    getSharedBrowser,
+    isBrowserAlive,
+    closeSharedBrowser
 };

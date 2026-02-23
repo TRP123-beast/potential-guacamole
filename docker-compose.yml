@@ -11,12 +11,13 @@ services:
       - PORT=${PORT:-3000}
       - DASHBOARD_PORT=3000
       - NODE_ENV=production
-      
+
       # Puppeteer Configuration
       - HEADLESS=${HEADLESS:-true}
       - SLOW_MO=${SLOW_MO:-100}
       - BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
-      
+      - BROWSER_DEBUG_PORT=${BROWSER_DEBUG_PORT:-9222}
+
       # User Profile (for auto-booking)
       - USER_NAME=${USER_NAME:-}
       - USER_EMAIL=${USER_EMAIL:-}
@@ -25,30 +26,36 @@ services:
       - PREFERRED_DURATION=${PREFERRED_DURATION:-60}
       - BOOKING_NOTES=${BOOKING_NOTES:-}
       - AUTO_CONFIRM_ONLY=${AUTO_CONFIRM_ONLY:-false}
-      
+
       # Supabase Configuration
       - SUPABASE_PROJECT_URL=${SUPABASE_PROJECT_URL:-}
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
-      
+
       # Scheduler Configuration
       - ENABLE_AUTO_FETCH=${ENABLE_AUTO_FETCH:-true}
       - FETCH_INTERVAL_MINUTES=${FETCH_INTERVAL_MINUTES:-12}
-      
+
+      # Auto-Cancel Configuration
+      - CANCEL_INTERVAL_MINUTES=${CANCEL_INTERVAL_MINUTES:-30}
+      - ENABLE_AUTO_CANCEL=${ENABLE_AUTO_CANCEL:-true}
+
     volumes:
       # Persist database and screenshots
       - ./src/data:/app/src/data
-      
-      # Optional: Mount Chrome profile for saved credentials
-      # Uncomment if you want to persist BrokerBay login sessions
-      # - ./chrome-profile:/app/chrome-profile
-      
+
+      # Mount pre-authenticated Chrome profile (from flatpak debug session)
+      # This reuses your locally logged-in BrokerBay session inside the container
+      - ${CHROME_PROFILE_PATH:-~/.var/app/com.google.Chrome/docker-profile}:/app/session-data
+
     restart: unless-stopped
-    
+
+    # Give Chromium enough shared memory (default 64MB is too small)
+    shm_size: '2gb'
+
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
+      test: [ "CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-

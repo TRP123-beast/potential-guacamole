@@ -42,40 +42,55 @@ async function getExecutablePath() {
   return undefined;
 }
 
-// User profile configuration
-const USER_PROFILE = {
-  name: process.env.USER_NAME || "NAHEED VALYANI",
-  email: process.env.USER_EMAIL || "naheed.val@gmail.com",
-  organization: process.env.USER_ORGANIZATION || "HOMELIFE/YORKLAND REAL ESTATE LTD.",
-  showingType: process.env.SHOWING_TYPE || "Buyer/Broker",
-  preferredDuration: parseInt(process.env.PREFERRED_DURATION || "60"),
-  notes: process.env.BOOKING_NOTES || "",
-  autoConfirmOnly: process.env.AUTO_CONFIRM_ONLY === "true"
-};
-
-// ==================== CLI ARGUMENT PARSING ====================
-const args = process.argv.slice(2);
-let propertyAddress = args[0];
-let preferredTimeArg = args[1] || process.env.PREFERRED_TIME || "";
-let preferredDateArg = args[2] || process.env.PREFERRED_DATE || "";
-let preferredDurationArg = args[3] || process.env.PREFERRED_DURATION || "";
-
-if (!propertyAddress) {
-  console.error("\n❌ Error: Please provide a property address to search");
-  console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time] [preferred_date] [preferred_duration]");
-  console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM' '15' '45'\n");
-  console.log("The script will:");
-  console.log("  1. Search for the property on BrokerBay");
-  console.log("  2. Select it from search results");
-  console.log("  3. Click 'Book Showing' button");
-  console.log("  4. Complete the booking form (time + duration)");
-  console.log("  5. Click 'AUTO-CONFIRM' to finalize\n");
-  process.exit(1);
+// User profile configuration (defaults; overridden by CLI or runBookingFlow params)
+function getUserProfile(overrides = {}) {
+  return {
+    name: overrides.name || process.env.USER_NAME || "NAHEED VALYANI",
+    email: overrides.email || process.env.USER_EMAIL || "naheed.val@gmail.com",
+    organization: overrides.organization || process.env.USER_ORGANIZATION || "HOMELIFE/YORKLAND REAL ESTATE LTD.",
+    showingType: overrides.showingType || process.env.SHOWING_TYPE || "Buyer/Broker",
+    preferredDuration: overrides.preferredDuration || parseInt(process.env.PREFERRED_DURATION || "60"),
+    notes: overrides.notes || process.env.BOOKING_NOTES || "",
+    autoConfirmOnly: overrides.autoConfirmOnly !== undefined ? overrides.autoConfirmOnly : process.env.AUTO_CONFIRM_ONLY === "true"
+  };
 }
 
-const parsedPreferredDuration = parseInt(preferredDurationArg, 10);
-if (!Number.isNaN(parsedPreferredDuration)) {
-  USER_PROFILE.preferredDuration = parsedPreferredDuration;
+// Module-level USER_PROFILE (used by internal step functions)
+let USER_PROFILE = getUserProfile();
+
+// ==================== CLI ARGUMENT PARSING ====================
+// Only parse CLI args and exit when run directly (not when imported)
+const _isMainModule = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/').split('/').pop());
+
+let propertyAddress = '';
+let preferredTimeArg = '';
+let preferredDateArg = '';
+let preferredDurationArg = '';
+
+if (_isMainModule) {
+  const args = process.argv.slice(2);
+  propertyAddress = args[0];
+  preferredTimeArg = args[1] || process.env.PREFERRED_TIME || "";
+  preferredDateArg = args[2] || process.env.PREFERRED_DATE || "";
+  preferredDurationArg = args[3] || process.env.PREFERRED_DURATION || "";
+
+  if (!propertyAddress) {
+    console.error("\n❌ Error: Please provide a property address to search");
+    console.log("\nUsage: node auto-book-enhanced.js <property_address> [preferred_time] [preferred_date] [preferred_duration]");
+    console.log("Example: node auto-book-enhanced.js '266 Brant Avenue' '10:00 AM' '15' '45'\n");
+    console.log("The script will:");
+    console.log("  1. Search for the property on BrokerBay");
+    console.log("  2. Select it from search results");
+    console.log("  3. Click 'Book Showing' button");
+    console.log("  4. Complete the booking form (time + duration)");
+    console.log("  5. Click 'AUTO-CONFIRM' to finalize\n");
+    process.exit(1);
+  }
+
+  const parsedPreferredDuration = parseInt(preferredDurationArg, 10);
+  if (!Number.isNaN(parsedPreferredDuration)) {
+    USER_PROFILE.preferredDuration = parsedPreferredDuration;
+  }
 }
 
 const BROKERBAY_DASHBOARD = "https://edge.brokerbay.com/#/listing/list/brokerage";
@@ -251,6 +266,7 @@ async function clickElementSafely(page, element, description = "element") {
 }
 
 // ==================== STEP 0.7: SEARCH FOR PROPERTY ====================
+// ==================== STEP 0.7: SEARCH FOR PROPERTY ====================
 async function searchForProperty(page, searchQuery) {
   logStep("0.7", "Searching for property on BrokerBay", 'info');
 
@@ -270,18 +286,20 @@ async function searchForProperty(page, searchQuery) {
   ];
 
   let searchFound = false;
+  let searchInput = null;
+
   for (const selector of searchSelectors) {
     try {
-      const searchBox = await page.$(selector);
-      if (searchBox) {
-        await searchBox.click();
-        await searchBox.type(searchQuery, { delay: 100 });
+      searchInput = await page.$(selector);
+      if (searchInput) {
+        // Clear existing input first
+        await searchInput.click({ clickCount: 3 });
+        await searchInput.press('Backspace');
+        await wait(200);
+
+        await searchInput.type(searchQuery, { delay: 100 });
         log(`  ✓ Entered search query`, 'dim');
         searchFound = true;
-
-        // Press Enter to search
-        await page.keyboard.press('Enter');
-        log(`  ✓ Pressed Enter to search`, 'dim');
         break;
       }
     } catch (error) {
@@ -293,8 +311,186 @@ async function searchForProperty(page, searchQuery) {
     throw new Error("Could not find search bar");
   }
 
-  // Wait for search results to actually load (not just a fixed timeout)
-  log(`  ⏳ Waiting for search results to load...`, 'dim');
+  // --- AUTOCOMPLETE / TYPEAHEAD DETECTION ---
+  log(`  ⏳ Waiting for autocomplete dropdown to appear...`, 'dim');
+
+  // Poll for up to 5 seconds for a dropdown item that matches the address
+  const queryParts = searchQuery.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(p => p.length > 0);
+  const streetNumber = queryParts.find(p => /^\d+$/.test(p));
+
+  let autocompleteClicked = false;
+
+  try {
+    // Wait for a visible element that contains the street number (strong signal for a search result)
+    await page.waitForFunction(
+      (streetNum) => {
+        if (!streetNum) return false;
+        // Look in the area below the search bar for matching visible elements
+        const allEls = Array.from(document.querySelectorAll('a, li, div, span'));
+        return allEls.some(el => {
+          if (el.offsetParent === null) return false; // hidden
+          const text = (el.textContent || '').toLowerCase();
+          return text.includes(streetNum) && text.length < 300 && text.length > 10;
+        });
+      },
+      { timeout: 5000 },
+      streetNumber || ''
+    );
+
+    log(`  ✓ Search results appeared in dropdown`, 'dim');
+    await wait(500); // Brief settle time for rendering
+
+    // Now find the best clickable element - prefer links, then smallest matching element
+    const dropdownResult = await page.evaluateHandle((query, streetNum) => {
+      const qParts = query.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(p => p.length > 0);
+
+      // Collect ALL visible elements that contain the street number
+      const allMatching = [];
+      const allEls = Array.from(document.querySelectorAll('a, li, div, span, button'));
+      for (const el of allEls) {
+        if (el.offsetParent === null) continue; // hidden
+        const text = (el.textContent || '').toLowerCase();
+        if (!text.includes(streetNum)) continue;
+        if (text.length > 300 || text.length < 10) continue;
+
+        // Count how many query parts match
+        const matchCount = qParts.filter(p => text.includes(p)).length;
+        if (matchCount < Math.min(2, qParts.length)) continue;
+
+        allMatching.push({ el, text, matchCount, textLen: text.length, tag: el.tagName.toLowerCase() });
+      }
+
+      if (allMatching.length === 0) return null;
+
+      // PRIORITY 1: <a> tags with href containing "listing" (direct link to listing page)
+      const listingLink = allMatching.find(m => m.tag === 'a' && (m.el.getAttribute('href') || '').includes('listing'));
+      if (listingLink) return listingLink.el;
+
+      // PRIORITY 2: <a> tags with any href (clickable links in the dropdown)
+      const anyLink = allMatching.find(m => m.tag === 'a' && m.el.getAttribute('href'));
+      if (anyLink) return anyLink.el;
+
+      // PRIORITY 3: Elements with ng-click (AngularJS click handlers, common in BrokerBay)
+      const ngClick = allMatching.find(m => m.el.hasAttribute('ng-click'));
+      if (ngClick) return ngClick.el;
+
+      // PRIORITY 4: Elements with a click/mousedown listener or role="option" / role="button"
+      const interactive = allMatching.find(m =>
+        m.el.getAttribute('role') === 'option' ||
+        m.el.getAttribute('role') === 'button' ||
+        m.tag === 'li' || m.tag === 'button'
+      );
+      if (interactive) return interactive.el;
+
+      // PRIORITY 5: The smallest (deepest/most specific) matching element
+      // Sort by text length ascending — shorter text = more specific element
+      allMatching.sort((a, b) => a.textLen - b.textLen);
+      return allMatching[0].el;
+
+    }, searchQuery, streetNumber || '');
+
+    if (dropdownResult && dropdownResult.asElement()) {
+      const el = dropdownResult.asElement();
+      const elInfo = await page.evaluate(e => ({
+        text: (e.textContent || '').substring(0, 80),
+        tag: e.tagName.toLowerCase(),
+        href: e.getAttribute('href') || '',
+        ngClick: e.getAttribute('ng-click') || '',
+        role: e.getAttribute('role') || '',
+      }), el);
+
+      log(`  ✓ Detected autocomplete result: "${elInfo.text}..."`, 'dim');
+      log(`    → Element: <${elInfo.tag}>${elInfo.href ? ' href="' + elInfo.href + '"' : ''}${elInfo.ngClick ? ' ng-click="' + elInfo.ngClick.substring(0, 40) + '"' : ''}${elInfo.role ? ' role="' + elInfo.role + '"' : ''}`, 'dim');
+
+      // Click the element
+      await clickElementSafely(page, el, "autocomplete listing result");
+      autocompleteClicked = true;
+
+      // Poll for navigation: wait up to 8 seconds for URL to change or listing UI to appear
+      log(`  ⏳ Waiting for navigation after autocomplete click...`, 'dim');
+      const listingUrlPattern = /\/listing\/[^/]+\/view/i;
+      const navigationSucceeded = await (async () => {
+        const start = Date.now();
+        while (Date.now() - start < 8000) {
+          // Check URL change
+          if (listingUrlPattern.test(page.url())) {
+            log(`  ✓ Navigated to listing page: ${page.url()}`, 'green');
+            return true;
+          }
+          // Check if a "Book Showing" / "Request Showing" button appeared (listing detail view)
+          const hasListingView = await page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button, a[role="button"], [role="button"]'));
+            return buttons.some(b => {
+              const t = (b.innerText || b.textContent || '').toLowerCase();
+              return t.includes('book showing') || t.includes('request showing');
+            });
+          }).catch(() => false);
+          if (hasListingView) {
+            log(`  ✓ Listing detail view detected (Book Showing button found)`, 'green');
+            return true;
+          }
+          await wait(500);
+        }
+        return false;
+      })();
+
+      if (navigationSucceeded) {
+        logStep("0.7", "Search completed — navigated via autocomplete", 'success');
+        return;
+      } else {
+        log(`  ⚠️ Autocomplete click did not trigger navigation. Trying fallbacks...`, 'yellow');
+
+        // Try clicking an <a> link INSIDE the element we found (in case we clicked a wrapper)
+        const innerLink = await el.$('a[href]');
+        if (innerLink) {
+          const innerHref = await page.evaluate(a => a.getAttribute('href'), innerLink);
+          log(`  ↳ Found inner <a> link: ${innerHref}`, 'dim');
+          await clickElementSafely(page, innerLink, "inner listing link");
+          await wait(3000);
+          if (listingUrlPattern.test(page.url())) {
+            log(`  ✓ Navigated via inner link`, 'green');
+            logStep("0.7", "Search completed — navigated via inner link", 'success');
+            return;
+          }
+          // Try direct navigation via the href
+          if (innerHref) {
+            const fullUrl = innerHref.startsWith('http') ? innerHref :
+              innerHref.startsWith('#') ? innerHref :
+                `https://edge.brokerbay.com/${innerHref.replace(/^#?/, '')}`;
+            log(`  ↳ Forcing navigation to: ${fullUrl}`, 'dim');
+            await page.evaluate(h => { window.location.href = h; }, fullUrl);
+            await wait(3000);
+            if (listingUrlPattern.test(page.url())) {
+              log(`  ✓ Navigated via forced href`, 'green');
+              logStep("0.7", "Search completed — navigated via forced href", 'success');
+              return;
+            }
+          }
+        }
+
+        // Dismiss the dropdown before falling through to table search
+        log(`  ↳ Dismissing autocomplete dropdown (Escape)`, 'dim');
+        await page.keyboard.press('Escape');
+        await wait(500);
+      }
+    } else {
+      log(`  ⚠️ No matching autocomplete element found`, 'yellow');
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('timeout')) {
+      log(`  ⚠️ No autocomplete dropdown appeared within 5s`, 'yellow');
+    } else {
+      log(`  ⚠️ Autocomplete check failed: ${err.message}`, 'yellow');
+    }
+  }
+
+  // --- FALLBACK: Press Enter and wait for search results table ---
+  if (searchInput && !autocompleteClicked) {
+    await searchInput.press('Enter');
+    log(`  ✓ Pressed Enter to search (fallback)`, 'dim');
+  }
+
+  log(`  ⏳ Waiting for search results table to load...`, 'dim');
 
   try {
     await page.waitForFunction(
@@ -306,11 +502,11 @@ async function searchForProperty(page, searchQuery) {
         });
         return validRows.length > 0;
       },
-      { timeout: 20000 }
+      { timeout: 10000 }
     );
-    log(`  ✓ Search results loaded`, 'dim');
+    log(`  ✓ Search results table loaded`, 'dim');
   } catch (e) {
-    log(`  ⚠️ Timeout waiting for results, proceeding anyway`, 'yellow');
+    log(`  ⚠️ Timeout waiting for results table, proceeding anyway`, 'yellow');
   }
 
   await wait(2000);
@@ -323,10 +519,90 @@ async function searchForProperty(page, searchQuery) {
 async function selectPropertyFromResults(page, searchQuery) {
   logStep("0.8", "Selecting property from search results", "info");
 
-  await wait(3000);
+  await wait(2000);
 
+  // Check if we are already on the listing page (e.g. from autocomplete click)
   const listingUrlPattern = /\/listing\/[^/]+\/view/i;
-  const searchRoot = searchQuery.toLowerCase().split(",")[0].trim();
+  if (listingUrlPattern.test(page.url())) {
+    log("  ✓ Already on listing page (likely from autocomplete selection)", "green");
+    return page;
+  }
+
+  // --- RE-CHECK: If the autocomplete dropdown is still visible, try clicking the listing link ---
+  try {
+    const streetNum = (searchQuery.match(/\d+/) || [''])[0];
+    const dropdownLink = await page.evaluateHandle((sn) => {
+      if (!sn) return null;
+      // Look for <a> tags that contain the street number and have a listing href
+      const links = Array.from(document.querySelectorAll('a[href*="listing"], a[href*="/listing/"]'));
+      for (const a of links) {
+        if (a.offsetParent === null) continue;
+        const text = (a.textContent || '').toLowerCase();
+        if (text.includes(sn)) return a;
+      }
+      // Also look for any visible <a> with the street number
+      const allLinks = Array.from(document.querySelectorAll('a[href]'));
+      for (const a of allLinks) {
+        if (a.offsetParent === null) continue;
+        const text = (a.textContent || '').toLowerCase();
+        const href = a.getAttribute('href') || '';
+        if (text.includes(sn) && (href.includes('listing') || href.includes('#/'))) return a;
+      }
+      return null;
+    }, streetNum);
+
+    if (dropdownLink && dropdownLink.asElement()) {
+      const linkEl = dropdownLink.asElement();
+      const linkInfo = await page.evaluate(a => ({
+        href: a.getAttribute('href') || '',
+        text: (a.textContent || '').substring(0, 60),
+      }), linkEl);
+      log(`  🔄 Re-detected dropdown listing link: "${linkInfo.text}" → ${linkInfo.href}`, 'dim');
+
+      await clickElementSafely(page, linkEl, "dropdown listing link (re-check)");
+      await wait(3000);
+
+      if (listingUrlPattern.test(page.url())) {
+        log("  ✓ Navigated to listing page via re-checked dropdown link", "green");
+        await wait(CONFIG.pageLoadWait);
+        await takeScreenshot(page, "00_property_page");
+        logStep("0.8", "Property page loaded", "success");
+        return page;
+      }
+
+      // Try forcing navigation via href
+      if (linkInfo.href) {
+        const fullUrl = linkInfo.href.startsWith('http') ? linkInfo.href :
+          linkInfo.href.startsWith('#') ? linkInfo.href :
+            `https://edge.brokerbay.com/${linkInfo.href.replace(/^#?/, '')}`;
+        log(`  ↳ Forcing navigation to: ${fullUrl}`, 'dim');
+        await page.evaluate(h => { window.location.href = h; }, fullUrl);
+        await wait(3000);
+        if (listingUrlPattern.test(page.url())) {
+          log("  ✓ Navigated via forced href from dropdown link", "green");
+          await wait(CONFIG.pageLoadWait);
+          await takeScreenshot(page, "00_property_page");
+          logStep("0.8", "Property page loaded", "success");
+          return page;
+        }
+      }
+
+      // Dismiss the stale dropdown
+      log("  ↳ Dismissing stale autocomplete dropdown", 'dim');
+      await page.keyboard.press('Escape');
+      await wait(500);
+    }
+  } catch (err) {
+    log(`  ⚠️ Dropdown re-check failed: ${err.message}`, 'yellow');
+  }
+
+  const queryParts = searchQuery.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '') // remove special chars
+    .split(/\s+/)
+    .filter(p => p.length > 0);
+
+  // We expect at least the street number to be present in a valid match
+  const streetNumber = queryParts.find(p => /^\d+$/.test(p));
 
   const rowSelectors = [
     "table tbody tr",
@@ -345,51 +621,61 @@ async function selectPropertyFromResults(page, searchQuery) {
 
     log(`  Found ${rows.length} rows with selector "${selector}"`, "dim");
 
-    // Filter out empty/invalid rows
-    const validRows = [];
+    // Filter out empty/invalid rows and score them
+    const scoredRows = [];
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
-        const text = await page.evaluate(el => el.textContent || "", row);
-        // Skip rows with very little content (likely headers or empty states)
-        if (!text || text.trim().length < 30) continue;
-        validRows.push({ row, text, index: i });
+        const textRaw = await page.evaluate(el => el.textContent || "", row);
+        const text = textRaw.toLowerCase();
+
+        // Skip rows with very little content
+        if (!textRaw || textRaw.trim().length < 30) continue;
+
+        // Scoring Logic:
+        // 1. Must contain street number (if one exists in query)
+        if (streetNumber && !text.includes(streetNumber)) {
+          continue;
+        }
+
+        // 2. Count matched tokens
+        const matchedTokens = queryParts.filter(part => text.includes(part));
+        const score = matchedTokens.length;
+
+        if (score > 0) {
+          scoredRows.push({ row, text: textRaw, index: i, score });
+        }
       } catch {
         continue;
       }
     }
 
-    if (validRows.length === 0) {
-      log(`  ⚠️ Found ${rows.length} rows but none contain valid listing data`, "yellow");
+    if (scoredRows.length === 0) {
+      log(`  ⚠️ Found ${rows.length} rows but none matched the address criteria (Street Number: ${streetNumber || 'N/A'})`, "yellow");
       continue;
     }
 
-    log(`  ✓ Found ${validRows.length} valid listing rows`, "dim");
+    // Sort by score descending
+    scoredRows.sort((a, b) => b.score - a.score);
 
-    // Try to find exact match
-    for (const { row, text, index } of validRows) {
-      const lower = text.toLowerCase();
-      if (lower.includes(searchRoot)) {
-        targetRow = row;
-        targetRowInfo = { selector, index, text };
-        log("  ✓ Found matching row for property search", "green");
-        break;
-      }
+    // Pick top result if it has a decent match
+    const bestMatch = scoredRows[0];
+
+    // Safety check: ensure we didn't just match "Drive" matches "Drive"
+    if (bestMatch.score >= Math.min(2, queryParts.length)) {
+      targetRow = bestMatch.row;
+      targetRowInfo = { selector, index: bestMatch.index, text: bestMatch.text };
+      log(`  ✓ Found matching row (Score: ${bestMatch.score}/${queryParts.length}): "${bestMatch.text.substring(0, 50)}..."`, "green");
+      break;
+    } else {
+      log(`  ⚠️ Best match score low (${bestMatch.score}). Text: "${bestMatch.text.substring(0, 50)}..."`, "yellow");
     }
-
-    // If we didn't find an exact match, fall back to the first valid row
-    if (!targetRow && validRows.length) {
-      targetRow = validRows[0].row;
-      targetRowInfo = { selector, index: validRows[0].index, text: validRows[0].text };
-      log("  ⚠️ No exact match found. Falling back to first valid search result row.", "yellow");
-    }
-
-    if (targetRow) break;
   }
 
   if (!targetRowInfo) {
-    await takeScreenshot(page, "00_no_search_rows_found");
-    throw new Error("Could not find property in search results (no valid rows found). This usually means the search returned no results or the page did not load properly. Check screenshot: 00_no_search_rows_found*.png");
+    await takeScreenshot(page, "00_no_search_match");
+    // Explicitly FAIL rather than clicking a random row
+    throw new Error(`Could not find property "${searchQuery}" in search results. Best attempt failed. Check screenshot 00_no_search_match.png`);
   }
 
   const beforeUrl = page.url();
@@ -965,224 +1251,360 @@ async function selectDateStep(page, preferredDate = null) {
 
   // Validate and process preferred date if provided
   if (preferredDate) {
-    let dayToSelect;
-    let targetMonth = currentMonth;
-    let targetYear = currentYear;
+    try {
+      let dayToSelect;
+      let targetMonth = currentMonth;
+      let targetYear = currentYear;
 
-    // Handle different input formats
-    if (preferredDate.includes('-')) {
-      // Format: "YYYY-MM-DD" or "2025-12-25"
-      const dateObj = new Date(preferredDate);
-      dayToSelect = dateObj.getDate();
-      targetMonth = dateObj.getMonth();
-      targetYear = dateObj.getFullYear();
-
-      // Navigate months if needed (limit to adjacent months)
-      if (targetYear !== currentYear) {
-        log(`  ❌ Preferred date ${preferredDate} is not in the current year; skipping.`, 'red');
-        throw new Error(`Preferred date ${preferredDate} is outside the current year view`);
-      }
-      const monthDiff = targetMonth - currentMonth;
-      if (monthDiff !== 0) {
-        const ok = await navigateMonths(page, monthDiff);
-        if (!ok) {
-          throw new Error(`Could not change calendar month for ${preferredDate}`);
+      // --- Parse the preferred date input ---
+      if (preferredDate.includes('-')) {
+        // Format: "YYYY-MM-DD" (e.g., "2026-02-17")
+        const dateObj = new Date(preferredDate + 'T00:00:00');
+        if (isNaN(dateObj.getTime())) {
+          log(`  ⚠️ Invalid date format: "${preferredDate}". Expected YYYY-MM-DD or a day number. Using default date.`, 'yellow');
+          // Fall through to auto-select
+        } else {
+          dayToSelect = dateObj.getDate();
+          targetMonth = dateObj.getMonth();
+          targetYear = dateObj.getFullYear();
         }
-        log(`  🔀 Navigated calendar by ${monthDiff} month(s)`, 'dim');
-      }
-    } else {
-      // Format: just the day number (e.g., "25")
-      dayToSelect = parseInt(preferredDate, 10);
-    }
-
-    // Validate the day is valid
-    if (isNaN(dayToSelect) || dayToSelect < 1 || dayToSelect > 31) {
-      throw new Error(`Invalid date: ${preferredDate}. Must be between 1-31.`);
-    } else if (dayToSelect < currentDay && targetMonth === currentMonth) {
-      throw new Error(`Date ${dayToSelect} is in the past for this month. Today is ${currentDay}.`);
-    } else {
-      log(`  ✓ Valid date requested: ${dayToSelect} (Current day: ${currentDay})`, 'dim');
-    }
-
-    log(`  🔍 Looking for date ${dayToSelect} in calendar...`, 'dim');
-
-    // Enhanced date selection with better error handling
-    const dateSelectionResult = await page.evaluate((targetDayStr) => {
-      const targetDay = parseInt(targetDayStr, 10);
-      if (Number.isNaN(targetDay)) return { success: false, reason: 'Invalid day number' };
-
-      const normalizeCellDay = (el) => {
-        const aria = el.getAttribute('aria-label') || '';
-        const ariaMatch = aria.match(/\b(\d{1,2})\b/);
-        if (ariaMatch) {
-          return parseInt(ariaMatch[1], 10);
-        }
-
-        const dataDate = el.getAttribute('data-date') || el.getAttribute('data-day');
-        if (dataDate) {
-          const parsed = parseInt(dataDate, 10);
-          if (!isNaN(parsed)) return parsed;
-        }
-
-        const text = (el.textContent || el.innerText || '').trim();
-        const textMatch = text.match(/^\s*(\d{1,2})\s*$/);
-        if (textMatch) {
-          return parseInt(textMatch[1], 10);
-        }
-
-        return NaN;
-      };
-
-      const isElementDisabled = (el) => {
-        if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
-        const classes = el.className || '';
-        if (classes.includes('disabled') || classes.includes('old') || classes.includes('new')) return true;
-        const style = window.getComputedStyle(el);
-        if (style.pointerEvents === 'none' || style.opacity === '0' || style.visibility === 'hidden') return true;
-        return false;
-      };
-
-      const tryClickElement = (el) => {
-        try {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          el.click();
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          return true;
-        } catch (err) {
-          return false;
-        }
-      };
-
-      const findAndClickDate = (parentSelector, childSelector = null) => {
-        const parents = Array.from(document.querySelectorAll(parentSelector));
-
-        for (const parent of parents) {
-          const candidates = childSelector
-            ? Array.from(parent.querySelectorAll(childSelector))
-            : [parent];
-
-          for (const el of candidates) {
-            const cellDay = normalizeCellDay(childSelector ? parent : el);
-
-            if (!Number.isNaN(cellDay) && cellDay === targetDay) {
-              if (isElementDisabled(el) || isElementDisabled(parent)) {
-                continue;
-              }
-
-              if (tryClickElement(el)) {
-                return {
-                  success: true,
-                  day: cellDay,
-                  element: el.tagName,
-                  selector: parentSelector + (childSelector ? ' > ' + childSelector : '')
-                };
-              }
-            }
-          }
-        }
-        return null;
-      };
-
-      const strategies = [
-        ['td.day:not(.disabled):not(.old):not(.new)', 'button'],
-        ['td.day:not(.disabled):not(.old):not(.new)', null],
-        ['button.day:not(.disabled):not(.old):not(.new)', null],
-        ['td[class*="day"]:not([class*="disabled"])', 'button'],
-        ['td[class*="day"]:not([class*="disabled"])', null],
-        ['[role="gridcell"]', 'button'],
-        ['[role="gridcell"]', null],
-        ['td.day', 'button'],
-        ['td.day', null],
-        ['button[class*="day"]', null],
-        ['.calendar-day', 'button'],
-        ['.calendar-day', null]
-      ];
-
-      const debugInfo = { found: [], disabled: [] };
-
-      for (const [parentSelector, childSelector] of strategies) {
-        const parents = Array.from(document.querySelectorAll(parentSelector));
-
-        for (const parent of parents) {
-          const candidates = childSelector
-            ? Array.from(parent.querySelectorAll(childSelector))
-            : [parent];
-
-          for (const el of candidates) {
-            const cellDay = normalizeCellDay(childSelector ? parent : el);
-
-            if (!Number.isNaN(cellDay) && cellDay === targetDay) {
-              debugInfo.found.push({
-                selector: parentSelector + (childSelector ? ' > ' + childSelector : ''),
-                day: cellDay,
-                disabled: isElementDisabled(el) || isElementDisabled(parent)
-              });
-
-              if (isElementDisabled(el) || isElementDisabled(parent)) {
-                debugInfo.disabled.push(parentSelector);
-                continue;
-              }
-
-              if (tryClickElement(el)) {
-                return {
-                  success: true,
-                  day: cellDay,
-                  element: el.tagName,
-                  selector: parentSelector + (childSelector ? ' > ' + childSelector : '')
-                };
-              }
-            }
-          }
-        }
-      }
-
-      return {
-        success: false,
-        reason: `Date ${targetDay} not found in calendar or all instances were disabled`,
-        debug: debugInfo
-      };
-    }, dayToSelect.toString());
-
-    if (dateSelectionResult.success) {
-      log(`  ✅ Successfully selected date ${dateSelectionResult.day}`, 'green');
-      log(`  📍 Used selector: ${dateSelectionResult.selector}`, 'dim');
-      await wait(3000);
-
-      // Verify time slots appeared
-      const timeSlotsAppeared = await page.evaluate(() => {
-        const slotSelectors = [
-          'button[class*="time"]:not([disabled])',
-          '.time-slot:not(.disabled)',
-          '[class*="slot"]:not([disabled])'
-        ];
-
-        for (const sel of slotSelectors) {
-          const slots = document.querySelectorAll(sel);
-          if (slots.length > 0) return true;
-        }
-        return false;
-      });
-
-      if (timeSlotsAppeared) {
-        log(`  ✅ Time slots loaded successfully`, 'green');
-        await takeScreenshot(page, '02_date_selected_preferred');
-        logStep(2, `Date ${dayToSelect} selected successfully`, 'success');
-        return true;
       } else {
-        log(`  ⚠️ Date clicked but time slots didn't appear. Retrying...`, 'yellow');
-        await wait(2000);
+        // Format: just the day number (e.g., "17")
+        const parsed = parseInt(preferredDate, 10);
+        if (isNaN(parsed) || parsed < 1 || parsed > 31) {
+          log(`  ⚠️ Invalid day number: "${preferredDate}". Must be 1-31. Using default date.`, 'yellow');
+        } else {
+          dayToSelect = parsed;
+        }
       }
-    } else {
-      log(`  ❌ Failed to select date ${dayToSelect}: ${dateSelectionResult.reason}`, 'yellow');
-      if (dateSelectionResult.debug?.found.length > 0) {
-        log(`  📊 Debug: Found ${dateSelectionResult.debug.found.length} element(s) with day ${dayToSelect}`, 'dim');
-        dateSelectionResult.debug.found.forEach((item, idx) => {
-          log(`    ${idx + 1}. ${item.selector} (disabled: ${item.disabled})`, 'dim');
-        });
+
+      if (dayToSelect !== undefined) {
+        // --- Validate: past date check ---
+        const targetDate = new Date(targetYear, targetMonth, dayToSelect);
+        const todayMidnight = new Date(currentYear, currentMonth, currentDay);
+
+        if (targetDate < todayMidnight) {
+          log(`  ⚠️ WARNING: Preferred date ${preferredDate} (${targetDate.toDateString()}) is in the past!`, 'yellow');
+          log(`  ⚠️ Today is ${todayMidnight.toDateString()}. Defaulting to today's date.`, 'yellow');
+          dayToSelect = currentDay;
+          targetMonth = currentMonth;
+          targetYear = currentYear;
+        } else {
+          log(`  ✓ Valid future date requested: day ${dayToSelect} (Today is day ${currentDay})`, 'dim');
+        }
+
+        // --- Navigate months if needed ---
+        if (targetYear !== currentYear || targetMonth !== currentMonth) {
+          const totalMonthDiff = (targetYear - currentYear) * 12 + (targetMonth - currentMonth);
+
+          if (Math.abs(totalMonthDiff) > 6) {
+            log(`  ⚠️ Date ${preferredDate} is too far away (${totalMonthDiff} months). Using default date.`, 'yellow');
+            dayToSelect = currentDay;
+            targetMonth = currentMonth;
+          } else if (totalMonthDiff !== 0) {
+            log(`  🔀 Navigating calendar by ${totalMonthDiff} month(s)...`, 'dim');
+            const isForward = totalMonthDiff > 0;
+            const steps = Math.abs(totalMonthDiff);
+
+            // BrokerBay calendar navigation arrow selectors
+            const arrowSelectors = isForward ? [
+              '.bb-calendar__nav-right',
+              'button[aria-label*="Next"]',
+              'button[aria-label*="next"]',
+              '.fc-next-button',
+              '.calendar-nav .next',
+              '[ng-click*="nextMonth"]',
+              '[ng-click*="next"]',
+              // Fallback: any > or › arrow on the right side of the calendar
+              '.calendar-header button:last-child',
+              '.cal-navigation button:last-child'
+            ] : [
+              '.bb-calendar__nav-left',
+              'button[aria-label*="Prev"]',
+              'button[aria-label*="prev"]',
+              '.fc-prev-button',
+              '.calendar-nav .prev',
+              '[ng-click*="prevMonth"]',
+              '[ng-click*="prev"]',
+              '.calendar-header button:first-child',
+              '.cal-navigation button:first-child'
+            ];
+
+            let navSuccess = true;
+            for (let i = 0; i < steps; i++) {
+              let clicked = false;
+              for (const sel of arrowSelectors) {
+                const btn = await page.$(sel);
+                if (btn) {
+                  await btn.click();
+                  clicked = true;
+                  log(`  ✓ Clicked month ${isForward ? 'next' : 'prev'} arrow (step ${i + 1}/${steps})`, 'dim');
+                  break;
+                }
+              }
+
+              // If CSS selectors didn't work, try finding the arrow by text content
+              if (!clicked) {
+                const arrowClicked = await page.evaluate((forward) => {
+                  const buttons = Array.from(document.querySelectorAll('button, a, span[role="button"]'));
+                  const arrowChars = forward ? ['›', '>', '▶', '»', 'next'] : ['‹', '<', '◀', '«', 'prev'];
+                  for (const btn of buttons) {
+                    const text = (btn.textContent || btn.innerText || '').trim().toLowerCase();
+                    if (arrowChars.some(c => text === c || text.includes(c))) {
+                      btn.click();
+                      return true;
+                    }
+                  }
+                  return false;
+                }, isForward);
+
+                if (arrowClicked) {
+                  clicked = true;
+                  log(`  ✓ Clicked month arrow via text match (step ${i + 1}/${steps})`, 'dim');
+                }
+              }
+
+              if (!clicked) {
+                log(`  ⚠️ Could not find calendar ${isForward ? 'next' : 'prev'} arrow. Using current month.`, 'yellow');
+                navSuccess = false;
+                break;
+              }
+              await wait(1000); // Wait for calendar to update
+            }
+
+            if (!navSuccess) {
+              log(`  ⚠️ Month navigation failed. Proceeding with current month.`, 'yellow');
+            }
+          }
+        }
+
+        // --- Click the target day in the calendar ---
+        log(`  🔍 Looking for day ${dayToSelect} in calendar...`, 'dim');
+
+        const dateSelectionResult = await page.evaluate((targetDayStr) => {
+          const targetDay = parseInt(targetDayStr, 10);
+          if (Number.isNaN(targetDay)) return { success: false, reason: 'Invalid day number' };
+
+          const normalizeCellDay = (el) => {
+            const aria = el.getAttribute('aria-label') || '';
+            const ariaMatch = aria.match(/\b(\d{1,2})\b/);
+            if (ariaMatch) return parseInt(ariaMatch[1], 10);
+
+            const dataDate = el.getAttribute('data-date') || el.getAttribute('data-day');
+            if (dataDate) {
+              const parsed = parseInt(dataDate, 10);
+              if (!isNaN(parsed)) return parsed;
+            }
+
+            const text = (el.textContent || el.innerText || '').trim();
+            const textMatch = text.match(/^\s*(\d{1,2})\s*$/);
+            if (textMatch) return parseInt(textMatch[1], 10);
+
+            return NaN;
+          };
+
+          const isElementDisabled = (el) => {
+            if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
+            const classes = el.className || '';
+            if (classes.includes('disabled') || classes.includes('old') || classes.includes('new')) return true;
+            const style = window.getComputedStyle(el);
+            if (style.pointerEvents === 'none' || style.opacity === '0' || style.visibility === 'hidden') return true;
+            return false;
+          };
+
+          const tryClickElement = (el) => {
+            try {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              el.click();
+              el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+              el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+              el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return true;
+            } catch (err) {
+              return false;
+            }
+          };
+
+          const strategies = [
+            // BrokerBay-specific selectors (AngularJS custom components)
+            ['[class*="bb-calendar"] td', null],
+            ['[class*="bb-calendar"] span', null],
+            ['[class*="bb-calendar"] div', null],
+            ['[class*="bb-calendar"] a', null],
+            ['[class*="bb-appointment"] td', null],
+            ['[class*="appointment-date"] td', null],
+            // Generic calendar selectors
+            ['td.day:not(.disabled):not(.old):not(.new)', 'button'],
+            ['td.day:not(.disabled):not(.old):not(.new)', null],
+            ['button.day:not(.disabled):not(.old):not(.new)', null],
+            ['td[class*="day"]:not([class*="disabled"])', 'button'],
+            ['td[class*="day"]:not([class*="disabled"])', null],
+            ['[role="gridcell"]', 'button'],
+            ['[role="gridcell"]', null],
+            ['td.day', 'button'],
+            ['td.day', null],
+            ['button[class*="day"]', null],
+            ['.calendar-day', 'button'],
+            ['.calendar-day', null]
+          ];
+
+          const debugInfo = { found: [], disabled: [], strategiesChecked: [] };
+
+          for (const [parentSelector, childSelector] of strategies) {
+            const parents = Array.from(document.querySelectorAll(parentSelector));
+            debugInfo.strategiesChecked.push({ selector: parentSelector, matchCount: parents.length });
+
+            for (const parent of parents) {
+              const candidates = childSelector
+                ? Array.from(parent.querySelectorAll(childSelector))
+                : [parent];
+
+              for (const el of candidates) {
+                const cellDay = normalizeCellDay(childSelector ? parent : el);
+
+                if (!Number.isNaN(cellDay) && cellDay === targetDay) {
+                  debugInfo.found.push({
+                    selector: parentSelector + (childSelector ? ' > ' + childSelector : ''),
+                    day: cellDay,
+                    disabled: isElementDisabled(el) || isElementDisabled(parent)
+                  });
+
+                  if (isElementDisabled(el) || isElementDisabled(parent)) {
+                    debugInfo.disabled.push(parentSelector);
+                    continue;
+                  }
+
+                  if (tryClickElement(el)) {
+                    return {
+                      success: true,
+                      day: cellDay,
+                      element: el.tagName,
+                      selector: parentSelector + (childSelector ? ' > ' + childSelector : '')
+                    };
+                  }
+                }
+              }
+            }
+          }
+
+          // NUCLEAR FALLBACK: Scan ALL visible elements in the calendar area
+          // BrokerBay uses custom AngularJS components — target any element whose
+          // text is exactly the day number within the "Step 2" / calendar section
+          const calendarContainers = document.querySelectorAll(
+            '[class*="calendar"], [class*="date"], [class*="appointment"], table, .step-2, [class*="step"]'
+          );
+
+          // Build a set of candidate containers — if none matched, use document.body
+          const containers = calendarContainers.length > 0
+            ? Array.from(calendarContainers)
+            : [document.body];
+
+          for (const container of containers) {
+            // Find all leaf-ish elements (td, span, div, a, button) with just a number as text
+            const allEls = Array.from(container.querySelectorAll('td, th, span, div, a, button, p'));
+            for (const el of allEls) {
+              const text = (el.textContent || el.innerText || '').trim();
+              // Must be exactly the day number (1-2 digits, nothing else)
+              if (!/^\d{1,2}$/.test(text)) continue;
+              const dayNum = parseInt(text, 10);
+              if (dayNum !== targetDay) continue;
+
+              // Skip if the element has too many children (it's a container, not a day cell)
+              if (el.children.length > 3) continue;
+
+              // Skip if not visible
+              const rect = el.getBoundingClientRect();
+              if (rect.width === 0 || rect.height === 0) continue;
+              const style = window.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+
+              // Skip header row elements (Sun, Mon, etc. area — day cells are usually below y=100 of the container)
+              if (isElementDisabled(el)) {
+                debugInfo.found.push({ selector: 'nuclear-fallback', day: dayNum, disabled: true });
+                continue;
+              }
+
+              debugInfo.found.push({ selector: 'nuclear-fallback', day: dayNum, disabled: false, tag: el.tagName });
+
+              if (tryClickElement(el)) {
+                return {
+                  success: true,
+                  day: dayNum,
+                  element: el.tagName,
+                  selector: 'nuclear-fallback (broad DOM scan)'
+                };
+              }
+            }
+          }
+
+          return {
+            success: false,
+            reason: `Date ${targetDay} not found in calendar or all instances were disabled`,
+            debug: debugInfo
+          };
+        }, dayToSelect.toString());
+
+        if (dateSelectionResult.success) {
+          log(`  ✅ Successfully selected date ${dateSelectionResult.day}`, 'green');
+          log(`  📍 Used selector: ${dateSelectionResult.selector}`, 'dim');
+
+          // Poll for time slots to appear (up to 8 seconds)
+          log(`  ⏳ Waiting for time slots to load after date selection...`, 'dim');
+          let timeSlotsLoaded = false;
+          const pollStart = Date.now();
+          while (Date.now() - pollStart < 8000) {
+            const hasSlots = await page.evaluate(() => {
+              const slotSelectors = [
+                'button[class*="time"]:not([disabled])',
+                '.time-slot:not(.disabled)',
+                '[class*="slot"]:not([disabled])'
+              ];
+              for (const sel of slotSelectors) {
+                const slots = document.querySelectorAll(sel);
+                if (slots.length > 0) return true;
+              }
+              return false;
+            });
+            if (hasSlots) {
+              timeSlotsLoaded = true;
+              break;
+            }
+            await wait(500);
+          }
+
+          if (timeSlotsLoaded) {
+            log(`  ✅ Time slots loaded for date ${dayToSelect}`, 'green');
+          } else {
+            log(`  ⚠️ No time slots loaded for date ${dayToSelect}. The listing may have no availability on this day.`, 'yellow');
+            log(`  ⚠️ Proceeding — Step 3 will attempt to find available slots.`, 'yellow');
+          }
+
+          await takeScreenshot(page, '02_date_selected_preferred');
+          logStep(2, `Date ${dayToSelect} selected successfully`, 'success');
+          return true;
+        } else {
+          log(`  ⚠️ Failed to click date ${dayToSelect}: ${dateSelectionResult.reason}`, 'yellow');
+          if (dateSelectionResult.debug?.strategiesChecked?.length > 0) {
+            log(`  📊 Debug: Strategies checked:`, 'dim');
+            dateSelectionResult.debug.strategiesChecked.forEach(s => {
+              if (s.matchCount > 0) log(`    ✓ ${s.selector}: ${s.matchCount} element(s)`, 'dim');
+            });
+            const noMatch = dateSelectionResult.debug.strategiesChecked.filter(s => s.matchCount === 0);
+            if (noMatch.length > 0) log(`    ✗ ${noMatch.length} strategies matched 0 elements`, 'dim');
+          }
+          if (dateSelectionResult.debug?.found.length > 0) {
+            log(`  📊 Debug: Found ${dateSelectionResult.debug.found.length} element(s) for day ${dayToSelect}`, 'dim');
+            dateSelectionResult.debug.found.forEach((item, idx) => {
+              log(`    ${idx + 1}. ${item.selector} (disabled: ${item.disabled}${item.tag ? ', tag: ' + item.tag : ''})`, 'dim');
+            });
+          }
+          log(`  ⚠️ Falling back to automatic date selection...`, 'yellow');
+        }
       }
-      log(`  ⚠️ Falling back to automatic date selection...`, 'yellow');
+    } catch (dateErr) {
+      log(`  ⚠️ Error during preferred date selection: ${dateErr.message}`, 'yellow');
+      log(`  ⚠️ Falling back to default (auto-selected) date. Proceeding...`, 'yellow');
+      await takeScreenshot(page, '02_date_error_fallback');
     }
   }
 
@@ -1622,9 +2044,8 @@ async function selectTimeAndDurationStep(page) {
         } else if (durationInfo.available.length) {
           log(`  ⚠️ Could not apply duration ${durationInfo.selected} minutes`, "yellow");
         }
-        log(`  ⏳ Waiting 30 seconds for duration to apply...`, "dim");
-        await wait(30000);
-        await waitForAutoConfirmButton(page, 20000);
+        log(`  ⏳ Waiting for duration to apply...`, "dim");
+        await wait(5000);
         log(`  ✓ Time slot clicked`, "dim");
         break;
       }
@@ -1650,6 +2071,9 @@ async function submitBooking(page) {
   logStep(4, "Clicking AUTO-CONFIRM button", 'info');
 
   await wait(2000);
+
+  // Wait for AUTO-CONFIRM / Book Showing button to become clickable
+  await waitForAutoConfirmButton(page, 15000);
 
   log(`  Looking for AUTO-CONFIRM button in top right...`, 'dim');
 
@@ -1936,23 +2360,71 @@ async function autoBookShowing() {
     }
     browser = await launchWithSession(launchOptions);
 
-    const page = await browser.newPage();
+    logStep(0, "Browser launched/connected successfully", 'success');
+
+    // Reuse existing tab/session if connected to existing browser
+    let page;
+    let reusedTab = false;
+
+    if (browser.isConnectedToExisting) {
+      logStep("0.1", "Checking for open BrokerBay tabs...", 'info');
+      const pages = await browser.pages();
+
+      // Look for a tab that is already on BrokerBay
+      const brokerBayPage = pages.find(p => {
+        const url = p.url();
+        return url.includes('brokerbay.com') && !url.includes('auth.brokerbay.com/login');
+      });
+
+      if (brokerBayPage) {
+        log(`  ✅ Found existing BrokerBay tab: ${brokerBayPage.url()}`, 'green');
+        log(`  ✅ Reusing authenticated session - validation will be skipped`, 'green');
+        page = brokerBayPage;
+        reusedTab = true;
+
+        // Bring it to front
+        try {
+          await page.bringToFront();
+          log(`  ✓ Brought tab to front`, 'dim');
+        } catch (e) {
+          log(`  ⚠️ Could not bring tab to front: ${e.message}`, 'dim');
+        }
+      } else {
+        log(`  ℹ️  No active BrokerBay tab found. Opening new tab...`, 'dim');
+        page = await browser.newPage();
+      }
+    } else {
+      page = await browser.newPage();
+    }
+
     await page.setViewport(CONFIG.viewport);
     await page.setDefaultTimeout(CONFIG.timeout);
     await page.setDefaultNavigationTimeout(CONFIG.navigationTimeout);
-    logStep(0, "Browser launched successfully", 'success');
 
     // Validate existing session (no login needed with MFA)
-    logStep("0.5", "Validating existing session", 'info');
-    await page.goto(BROKERBAY_DASHBOARD, {
-      waitUntil: 'domcontentloaded',
-      timeout: CONFIG.navigationTimeout
-    });
-    await wait(3000);
+    // Skip validation if we reused an authenticated tab - it's already verified
+    if (reusedTab) {
+      logStep("0.5", "Skipping session validation - using existing authenticated tab", 'success');
+      log(`  ✓ Tab already authenticated at: ${page.url()}`, 'dim');
+      log(`  ✓ Proceeding directly to booking flow`, 'dim');
+    } else {
+      logStep("0.5", "Validating existing session", 'info');
 
-    // Check if session is still valid
-    await validateSessionOrPrompt(page);
-    logStep("0.5", "Session validated - already logged in", 'success');
+      // Navigate to dashboard if needed
+      if (!page.url().includes('brokerbay.com')) {
+        await page.goto(BROKERBAY_DASHBOARD, {
+          waitUntil: 'domcontentloaded',
+          timeout: CONFIG.navigationTimeout
+        });
+        await wait(3000);
+      } else {
+        log(`  ✓ Already on BrokerBay page`, 'dim');
+      }
+
+      // Check if session is still valid (skip navigation if already on BrokerBay)
+      await validateSessionOrPrompt(page, true);
+      logStep("0.5", "Session validated - already logged in", 'success');
+    }
 
     // Wait for dashboard to fully load
     logStep("0.6", "Waiting for dashboard to load", 'info');
@@ -2065,14 +2537,175 @@ async function autoBookShowing() {
         log("Browser will remain open for 10 seconds for inspection...", 'dim');
         await new Promise(resolve => setTimeout(resolve, 10000));
       }
-      await browser.close();
-      log("Browser closed\n", 'dim');
+      if (browser.isConnectedToExisting) {
+        log("Disconnecting from existing browser (keeping window open)...", 'dim');
+        browser.disconnect();
+      } else {
+        await browser.close();
+        log("Browser closed\n", 'dim');
+      }
     }
   }
 
   return bookingResult;
 }
 
-// ==================== RUN THE SCRIPT ====================
-autoBookShowing().catch(console.error);
+// ==================== EXPORTED API FOR WORKER ====================
+/**
+ * Run a booking flow using a pre-existing browser instance.
+ * This is the main entry point when called from the worker (not CLI).
+ *
+ * @param {import('puppeteer').Browser} browser - An already-connected Puppeteer browser
+ * @param {Object} params
+ * @param {string} params.address - Property address to search and book
+ * @param {string} [params.preferredTime='8:00 PM'] - Preferred booking time
+ * @param {string} [params.preferredDate=''] - Preferred date (YYYY-MM-DD or day number)
+ * @param {number} [params.preferredDuration=60] - Preferred duration in minutes
+ * @returns {Promise<{success: boolean, bookingId: number|null, error: string|null}>}
+ */
+export async function runBookingFlow(browser, params = {}) {
+  const {
+    address,
+    preferredTime = '8:00 PM',
+    preferredDate = '',
+    preferredDuration = 60
+  } = params;
 
+  if (!address) {
+    return { success: false, bookingId: null, error: 'No address provided' };
+  }
+
+  // Set module-level USER_PROFILE with any overrides
+  USER_PROFILE = getUserProfile({ preferredDuration });
+
+  let bookingResult = { success: false, error: null, bookingId: null };
+  let detectedListingId = 'Unknown';
+  let bookingPageUrl = '';
+
+  try {
+    log(`\n${'='.repeat(70)}`, 'cyan');
+    log(`  🤖 [BOOKING] Auto-booking: ${address}`, 'cyan');
+    log(`${'='.repeat(70)}`, 'cyan');
+    log(`  User: ${USER_PROFILE.name} (${USER_PROFILE.email})`, 'dim');
+    log(`  Preferred Time: ${preferredTime}`, 'dim');
+    log(`  Preferred Date: ${preferredDate || 'auto'}`, 'dim');
+    log(`  Preferred Duration: ${preferredDuration} min`, 'dim');
+
+    // Get or create a page from the existing browser
+    let page;
+    let reusedTab = false;
+
+    if (browser.isConnectedToExisting) {
+      const pages = await browser.pages();
+      const brokerBayPage = pages.find(p => {
+        const url = p.url();
+        return url.includes('brokerbay.com') && !url.includes('auth.brokerbay.com/login');
+      });
+
+      if (brokerBayPage) {
+        log(`  ✅ Reusing existing BrokerBay tab: ${brokerBayPage.url()}`, 'green');
+        page = brokerBayPage;
+        reusedTab = true;
+        try { await page.bringToFront(); } catch { }
+      } else {
+        page = await browser.newPage();
+      }
+    } else {
+      // For a Puppeteer-launched browser, reuse first page or create new
+      const pages = await browser.pages();
+      page = pages.length > 0 ? pages[0] : await browser.newPage();
+    }
+
+    await page.setViewport(CONFIG.viewport);
+    await page.setDefaultTimeout(CONFIG.timeout);
+    await page.setDefaultNavigationTimeout(CONFIG.navigationTimeout);
+
+    // Validate session
+    if (reusedTab) {
+      log(`  ✓ Using authenticated tab — skipping validation`, 'dim');
+    } else {
+      if (!page.url().includes('brokerbay.com')) {
+        await page.goto(BROKERBAY_DASHBOARD, {
+          waitUntil: 'domcontentloaded',
+          timeout: CONFIG.navigationTimeout
+        });
+        await wait(3000);
+      }
+      await validateSessionOrPrompt(page, true);
+    }
+
+    await wait(CONFIG.pageLoadWait);
+
+    // Run the booking steps
+    await searchForProperty(page, address);
+    const listingPage = await selectPropertyFromResults(page, address);
+
+    const listingIdFromUrl = extractListingIdFromUrl(listingPage);
+    if (listingIdFromUrl) {
+      detectedListingId = listingIdFromUrl;
+      log(`  ✓ Listing ID: ${detectedListingId}`, 'dim');
+    }
+
+    await clickBookShowingButton(listingPage);
+    bookingPageUrl = listingPage.url();
+
+    await fillProfileStep(listingPage);
+    await selectDateStep(listingPage, preferredDate);
+    const timeInfo = await selectTimeAndDurationStep(listingPage);
+    const submitResult = await submitBooking(listingPage);
+    const confirmation = await verifyConfirmation(listingPage);
+    const autoConfirmed = Boolean(submitResult.isAutoConfirm || timeInfo.autoConfirm);
+    const bookingStatus = confirmation.isConfirmed || autoConfirmed ? 'Confirmed' : 'Pending';
+
+    const bookingDate = await page.evaluate(() => {
+      const sel = document.querySelector('.selected, .active, [class*="selected"]');
+      return sel ? sel.textContent.trim() : new Date().toLocaleDateString();
+    });
+
+    const bookingData = {
+      listing_id: detectedListingId,
+      property_address: address,
+      booking_date: bookingDate || new Date().toISOString().split('T')[0],
+      booking_time: timeInfo.time,
+      duration: timeInfo.duration,
+      user_name: USER_PROFILE.name,
+      user_email: USER_PROFILE.email,
+      organization: USER_PROFILE.organization,
+      showing_type: USER_PROFILE.showingType,
+      status: bookingStatus,
+      auto_confirmed: autoConfirmed,
+      booking_url: bookingPageUrl || page.url(),
+      screenshot_path: `${CONFIG.screenshotDir}/05_confirmation_*.png`,
+      confirmation_message: confirmation.message
+    };
+
+    const bookingId = saveBooking(bookingData);
+
+    if (bookingId) {
+      log(`  ✅ [BOOKING] Saved (ID: ${bookingId}) — ${bookingStatus}`, 'green');
+      bookingResult = { success: true, bookingId, error: null };
+    } else {
+      log(`  ❌ [BOOKING] Failed to save to database`, 'red');
+      bookingResult.error = 'Database save failed';
+    }
+
+  } catch (error) {
+    log(`  ❌ [BOOKING] Error: ${error.message}`, 'red');
+    bookingResult.error = error.message;
+
+    try {
+      const pages = await browser.pages();
+      if (pages.length > 0) await takeScreenshot(pages[0], 'worker_booking_error');
+    } catch { }
+  }
+
+  // NOTE: We do NOT close the browser here — the worker owns it
+  return bookingResult;
+}
+
+export { setupDatabase, saveBooking, CONFIG, getUserProfile };
+
+// ==================== RUN AS CLI ====================
+if (_isMainModule) {
+  autoBookShowing().catch(console.error);
+}

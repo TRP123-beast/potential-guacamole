@@ -30,8 +30,10 @@ RUN mkdir -p /app/src/data /app/src/data/screenshots && \
 # 6. Expose the port
 EXPOSE 3000
 
-# Create persistent session directory
+# Create persistent session directory and copy pre-authenticated Chrome profile
+# Run ./prepare-chrome-session.sh before building to extract session files
 RUN mkdir -p /app/session-data && chmod 700 /app/session-data
+COPY chrome-session/ /app/session-data/
 # Set session environment variable
 ENV BROWSER_PROFILE_USERDATA=/app/session-data
 

@@ -38,3 +38,5 @@ backups/
 tmp/
 temp/
 *.tmp
+# Extracted Chrome session for Docker (contains auth cookies)
+chrome-session/

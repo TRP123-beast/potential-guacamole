@@ -2631,7 +2631,12 @@ export async function runBookingFlow(browser, params = {}) {
         });
         await wait(3000);
       }
-      await validateSessionOrPrompt(page, true);
+      const sessionOk = await isSessionValid(page);
+      if (!sessionOk) {
+        log('  ❌ [BOOKING] BrokerBay session expired — cannot book without a valid session.', 'red');
+        log('  💡 [BOOKING] Ensure the mounted Chrome profile is freshly logged in and re-deploy.', 'yellow');
+        return { success: false, bookingId: null, error: 'Session expired — re-deploy with a fresh Chrome profile' };
+      }
     }
 
     await wait(CONFIG.pageLoadWait);

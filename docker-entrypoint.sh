@@ -8,6 +8,36 @@ if [ ! -f /app/src/data/data.db ]; then
     node init-database.js || echo "⚠️ Database initialization failed, but continuing..."
 fi
 
+# Clean Chrome lock files from the mounted session profile.
+# These are left behind by a previous Chrome process and prevent the
+# container's Chromium from loading the profile's saved session/cookies.
+SESSION_DIR="${BROWSER_PROFILE_USERDATA:-/app/session-data}"
+if [ -d "$SESSION_DIR" ]; then
+    echo "🧹 Cleaning Chrome lock files from session profile: $SESSION_DIR"
+    for lock_file in \
+        "$SESSION_DIR/SingletonLock" \
+        "$SESSION_DIR/SingletonCookie" \
+        "$SESSION_DIR/SingletonSocket" \
+        "$SESSION_DIR/lockfile" \
+        "$SESSION_DIR/Default/.com.google.Chrome.NTjLid" \
+        "$SESSION_DIR/Default/Cache/Cache_Data/index" \
+        "$SESSION_DIR/Default/.org.chromium.Chromium.*"; do
+        # Use glob-safe removal
+        rm -f "$lock_file" 2>/dev/null || true
+    done
+    # Also remove any .com.google.Chrome.* temp lock files in the profile root
+    find "$SESSION_DIR" -maxdepth 2 \( \
+        -name "SingletonLock" \
+        -o -name "SingletonCookie" \
+        -o -name "SingletonSocket" \
+        -o -name ".com.google.Chrome.*" \
+        -o -name ".org.chromium.Chromium.*" \
+    \) -delete 2>/dev/null || true
+    echo "✅ Lock files cleaned"
+else
+    echo "ℹ️  Session directory not found at $SESSION_DIR, skipping lock cleanup"
+fi
+
 # Start D-Bus for Chromium stability in containers
 if command -v dbus-daemon &> /dev/null; then
     mkdir -p /var/run/dbus

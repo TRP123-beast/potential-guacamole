@@ -44,17 +44,12 @@ build
 logs
 *.log
 
-# Chrome profiles (full profiles — excluded from builds)
+# Chrome profile (will be mounted as volume if needed)
 chrome-profile
 
 # Local Chrome debug profile (flatpak session copy)
 debug-profile
 **/debug-profile
-docker-profile
-**/docker-profile
-
-# ALLOW extracted session files for Docker build (created by prepare-chrome-session.sh)
-!chrome-session
 
 # Screenshots (will be in mounted volume)
 src/data/screenshots/*

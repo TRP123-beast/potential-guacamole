@@ -52,7 +52,7 @@ import { configDotenv } from "dotenv";
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import fs from "fs/promises";
-import { launchWithSession, validateSessionOrPrompt } from "./src/session-manager.js";
+import { launchWithSession, validateSessionOrPrompt, isSessionValid } from "./src/session-manager.js";
 
 puppeteer.use(StealthPlugin());
 configDotenv();
@@ -1146,10 +1146,8 @@ export async function runCancellationSweep(browser, options = {}) {
 
         await page.setViewport(CONFIG.viewport);
 
-        // Validate session
-        if (reusedTab) {
-            log(`  ✓ Using authenticated tab — skipping validation`, 'dim');
-        } else {
+        // Validate session — graceful check: don't throw, just return early with message
+        if (!reusedTab) {
             if (!page.url().includes('brokerbay.com')) {
                 await page.goto('https://edge.brokerbay.com/#/my_business', {
                     waitUntil: 'domcontentloaded',
@@ -1157,7 +1155,15 @@ export async function runCancellationSweep(browser, options = {}) {
                 });
                 await wait(3000);
             }
-            await validateSessionOrPrompt(page, true);
+            const sessionOk = await isSessionValid(page);
+            if (!sessionOk) {
+                log('  ❌ [CANCEL] BrokerBay session is expired or invalid in Docker.', 'red');
+                log('  ⚠️  [CANCEL] The mounted Chrome profile may have stale cookies.', 'yellow');
+                log('  💡 [CANCEL] To fix: ensure the debug-profile is freshly logged in,', 'yellow');
+                log('              then re-deploy to copy the updated session.', 'yellow');
+                stats.errors.push('Session expired — re-deploy with a fresh Chrome profile');
+                return stats; // Bail out gracefully; do not throw
+            }
         }
 
         // Navigate to showings

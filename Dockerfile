@@ -23,7 +23,13 @@ RUN npm ci --only=production
 # 4. Copy source code
 COPY . .
 
-# 5. Create data directory for SQLite database and screenshots
+# 5. Stash exported-session.json outside the volume mount path.
+#    The Railway volume at /app/src/data overwrites build-time files,
+#    so we save a copy that the entrypoint seeds into the volume on startup.
+RUN mkdir -p /app/session-seed && \
+    (cp src/data/exported-session.json /app/session-seed/ 2>/dev/null || true)
+
+# 6. Create data directory for SQLite database and screenshots
 RUN mkdir -p /app/src/data /app/src/data/screenshots && \
     chmod -R 755 /app/src/data
 

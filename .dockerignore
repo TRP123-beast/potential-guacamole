@@ -50,9 +50,12 @@ chrome-profile
 # Local Chrome debug profile (flatpak session copy)
 debug-profile
 **/debug-profile
+docker-profile
+**/docker-profile
 
-# Screenshots (will be in mounted volume)
+# Screenshots (will be in mounted volume) — but keep exported-session.json
 src/data/screenshots/*
+!src/data/exported-session.json
 
 # Temporary files
 tmp

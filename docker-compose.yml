@@ -41,12 +41,10 @@ services:
       - ENABLE_AUTO_CANCEL=${ENABLE_AUTO_CANCEL:-true}
 
     volumes:
-      # Persist database and screenshots
+      # Persist database, screenshots, and exported session cookies
+      # (exported-session.json is copied into the image at build time AND
+      #  persisted here across container restarts)
       - ./src/data:/app/src/data
-
-      # Mount pre-authenticated Chrome profile (from flatpak debug session)
-      # This reuses your locally logged-in BrokerBay session inside the container
-      - ${CHROME_PROFILE_PATH:-~/.var/app/com.google.Chrome/docker-profile}:/app/session-data
 
     restart: unless-stopped
 

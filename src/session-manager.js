@@ -199,9 +199,14 @@ export async function launchWithSession(options = {}) {
 
         // Enable remote debugging so we can reconnect to this instance later
         launchOptions.args.push(`--remote-debugging-port=${debugPort}`);
+        // Use basic password store so cookies are portable (no GNOME Keyring dependency)
+        launchOptions.args.push('--password-store=basic');
 
         const browser = await puppeteer.launch(launchOptions);
         console.log('✅ Browser launched with persistent session');
+
+        // Inject saved session cookies if available (critical for Docker deployments)
+        await injectExportedSession(browser);
 
         return browser;
 
@@ -212,6 +217,81 @@ export async function launchWithSession(options = {}) {
 }
 
 // Wait for user to complete manual login
+// (preceded by injectExportedSession helper)
+
+// Load exported session cookies + localStorage into a fresh browser
+async function injectExportedSession(browser) {
+    const sessionPath = path.resolve('src/data/exported-session.json');
+
+    try {
+        await fs.access(sessionPath);
+    } catch {
+        // No exported session file — skip silently
+        return;
+    }
+
+    try {
+        const raw = await fs.readFile(sessionPath, 'utf-8');
+        const session = JSON.parse(raw);
+
+        console.log(`🍪 [SESSION] Loading exported session (from ${session.exportedAt})`);
+
+        const pages = await browser.pages();
+        const page = pages[0] || await browser.newPage();
+
+        // Inject cookies via CDP (handles cross-domain cookies)
+        if (session.cookies && session.cookies.length > 0) {
+            const client = await page.createCDPSession();
+
+            for (const cookie of session.cookies) {
+                try {
+                    const cookieParams = {
+                        name: cookie.name,
+                        value: cookie.value,
+                        domain: cookie.domain,
+                        path: cookie.path || '/',
+                        secure: cookie.secure || false,
+                        httpOnly: cookie.httpOnly || false,
+                        sameSite: cookie.sameSite || 'Lax',
+                    };
+                    if (cookie.expires && cookie.expires > 0) {
+                        cookieParams.expires = cookie.expires;
+                    }
+                    await client.send('Network.setCookie', cookieParams);
+                } catch { }
+            }
+
+            await client.detach();
+            console.log(`  ✅ Injected ${session.cookies.length} cookies`);
+        }
+
+        // Navigate to BrokerBay to set localStorage in correct origin
+        if (session.localStorage && Object.keys(session.localStorage).length > 0) {
+            console.log('  📦 Injecting localStorage...');
+            await page.goto('https://edge.brokerbay.com/#/my_business', {
+                waitUntil: 'domcontentloaded',
+                timeout: 30000,
+            });
+            await new Promise(r => setTimeout(r, 2000));
+
+            await page.evaluate((data) => {
+                for (const [key, value] of Object.entries(data)) {
+                    try { localStorage.setItem(key, value); } catch { }
+                }
+            }, session.localStorage);
+
+            console.log(`  ✅ Injected ${Object.keys(session.localStorage).length} localStorage entries`);
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+            await new Promise(r => setTimeout(r, 2000));
+        }
+
+        console.log('✅ [SESSION] Exported session loaded successfully');
+    } catch (error) {
+        console.error(`⚠️  [SESSION] Failed to load exported session: ${error.message}`);
+    }
+}
+
+
 export async function waitForManualLogin(page, timeout = 300000) {
     console.log('\n' + '='.repeat(70));
     console.log('🔐 MANUAL LOGIN REQUIRED');

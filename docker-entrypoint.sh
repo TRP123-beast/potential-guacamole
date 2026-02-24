@@ -38,6 +38,17 @@ else
     echo "ℹ️  Session directory not found at $SESSION_DIR, skipping lock cleanup"
 fi
 
+# Seed exported session cookies into the volume-mounted data directory.
+# The Railway volume at /app/src/data overwrites build-time files, so we
+# stashed a copy in /app/session-seed/ during docker build. Copy it in
+# on every start so the latest exported cookies are always available.
+if [ -f /app/session-seed/exported-session.json ]; then
+    cp /app/session-seed/exported-session.json /app/src/data/exported-session.json
+    echo "🍪 Seeded exported-session.json into data volume"
+else
+    echo "ℹ️  No exported-session.json found in build — skipping session seed"
+fi
+
 # Start D-Bus for Chromium stability in containers
 if command -v dbus-daemon &> /dev/null; then
     mkdir -p /var/run/dbus

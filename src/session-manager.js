@@ -205,8 +205,11 @@ export async function launchWithSession(options = {}) {
         const browser = await puppeteer.launch(launchOptions);
         console.log('✅ Browser launched with persistent session');
 
-        // Inject saved session cookies if available (critical for Docker deployments)
-        await injectExportedSession(browser);
+        // Inject saved session cookies if available (critical for Docker/Railway deployments).
+        // _sessionReady=true means the injected cookies produced a live authenticated session
+        // so the booking flow can skip re-validation, mirroring the UI's connected-browser path.
+        const sessionReady = await injectExportedSession(browser);
+        browser._sessionReady = sessionReady;
 
         return browser;
 
@@ -219,15 +222,15 @@ export async function launchWithSession(options = {}) {
 // Wait for user to complete manual login
 // (preceded by injectExportedSession helper)
 
-// Load exported session cookies + localStorage into a fresh browser
+// Load exported session cookies + localStorage into a fresh browser.
+// Returns true if the injected session is authenticated, false otherwise.
 async function injectExportedSession(browser) {
     const sessionPath = path.resolve('src/data/exported-session.json');
 
     try {
         await fs.access(sessionPath);
     } catch {
-        // No exported session file — skip silently
-        return;
+        return false;
     }
 
     try {
@@ -239,7 +242,6 @@ async function injectExportedSession(browser) {
         const pages = await browser.pages();
         const page = pages[0] || await browser.newPage();
 
-        // Inject cookies via CDP (handles cross-domain cookies)
         if (session.cookies && session.cookies.length > 0) {
             const client = await page.createCDPSession();
 
@@ -265,15 +267,27 @@ async function injectExportedSession(browser) {
             console.log(`  ✅ Injected ${session.cookies.length} cookies`);
         }
 
-        // Navigate to BrokerBay to set localStorage in correct origin
+        // Always navigate to BrokerBay — needed for localStorage injection AND to verify
+        // that the injected cookies actually produce an authenticated session.
+        console.log('  🔍 [SESSION] Navigating to BrokerBay to verify injected session...');
+        await page.goto('https://edge.brokerbay.com/#/my_business', {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000,
+        });
+        await new Promise(r => setTimeout(r, 2000));
+
+        const landedUrl = page.url();
+        const sessionIsValid = landedUrl.includes('edge.brokerbay.com') &&
+            !landedUrl.includes('auth.brokerbay.com');
+
+        if (!sessionIsValid) {
+            console.warn('⚠️  [SESSION] Injected session is INVALID — cookies are expired or missing.');
+            console.warn('   👉 Re-export session from the UI and re-deploy to fix this.');
+            return false;
+        }
+
         if (session.localStorage && Object.keys(session.localStorage).length > 0) {
             console.log('  📦 Injecting localStorage...');
-            await page.goto('https://edge.brokerbay.com/#/my_business', {
-                waitUntil: 'domcontentloaded',
-                timeout: 30000,
-            });
-            await new Promise(r => setTimeout(r, 2000));
-
             await page.evaluate((data) => {
                 for (const [key, value] of Object.entries(data)) {
                     try { localStorage.setItem(key, value); } catch { }
@@ -285,9 +299,11 @@ async function injectExportedSession(browser) {
             await new Promise(r => setTimeout(r, 2000));
         }
 
-        console.log('✅ [SESSION] Exported session loaded successfully');
+        console.log('✅ [SESSION] Exported session loaded and verified successfully');
+        return true;
     } catch (error) {
         console.error(`⚠️  [SESSION] Failed to load exported session: ${error.message}`);
+        return false;
     }
 }
 

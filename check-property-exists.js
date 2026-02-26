@@ -1,13 +1,9 @@
 #!/usr/bin/env node
 
 import { configDotenv } from "dotenv";
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { loginToBrokerBay } from "./src/utils.js";
-import fs from "fs/promises";
+import { launchWithSession } from "./src/session-manager.js";
 
 configDotenv();
-puppeteer.use(StealthPlugin());
 
 const args = process.argv.slice(2);
 const property = args[0];
@@ -18,8 +14,6 @@ if (!property || property.trim().length < 3) {
 }
 
 const CONFIG = {
-  headless: true,
-  slowMo: parseInt(process.env.SLOW_MO || "80"),
   timeout: 90000,
   navigationTimeout: 120000,
   pageLoadWait: 4000,
@@ -27,17 +21,6 @@ const CONFIG = {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function getExecutablePath() {
-  const path = process.env.BROWSER_EXECUTABLE_PATH;
-  if (!path) return undefined;
-  try {
-    await fs.access(path);
-    return path;
-  } catch {
-    return undefined;
-  }
-}
 
 function normalizePropertyAddress(raw) {
   if (!raw) return "";
@@ -82,38 +65,25 @@ async function searchAndDetect(page, searchQuery) {
 
 async function main() {
   let browser = null;
+  let page = null;
+
   try {
     console.log("🔍 Checking property existence:", property);
 
-    const executablePath = await getExecutablePath();
-    const launchOptions = {
-      headless: CONFIG.headless,
-      slowMo: CONFIG.slowMo,
-      userDataDir: process.env.BROWSER_PROFILE_USERDATA,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      protocolTimeout: CONFIG.navigationTimeout,
-    };
-    if (executablePath) {
-      launchOptions.executablePath = executablePath;
-    }
-    browser = await puppeteer.launch(launchOptions);
+    // Connect to the worker's already-running browser via CDP when possible.
+    // launchWithSession tries port 9222 first — no userDataDir conflict with the worker.
+    browser = await launchWithSession({ headless: true });
 
-    const page = await browser.newPage();
+    page = await browser.newPage();
     await page.setViewport(CONFIG.viewport);
     await page.setDefaultTimeout(CONFIG.timeout);
     await page.setDefaultNavigationTimeout(CONFIG.navigationTimeout);
-
-    const loginOk = await loginToBrokerBay(page);
-    if (!loginOk) {
-      console.error("❌ Login failed");
-      process.exit(1);
-    }
 
     await page.goto("https://edge.brokerbay.com/#/listing/list/brokerage", {
       waitUntil: "networkidle2",
       timeout: CONFIG.navigationTimeout,
     });
-  await sleep(CONFIG.pageLoadWait);
+    await sleep(CONFIG.pageLoadWait);
 
     const exists = await searchAndDetect(page, property);
 
@@ -123,10 +93,13 @@ async function main() {
     console.error(`❌ Error: ${err.message}`);
     process.exit(1);
   } finally {
-    if (browser) await browser.close();
+    if (page) {
+      try { await page.close(); } catch { }
+    }
+    if (browser && !browser.isConnectedToExisting) {
+      try { await browser.close(); } catch { }
+    }
   }
 }
 
 main();
-
-

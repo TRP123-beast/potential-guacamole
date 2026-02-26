@@ -2595,11 +2595,14 @@ export async function runBookingFlow(browser, params = {}) {
     let page;
     let reusedTab = false;
 
-    if (browser.isConnectedToExisting) {
+    // Both a live connected browser (UI path) and a browser with a freshly injected
+    // exported session (worker/Railway path) already have an authenticated BrokerBay tab.
+    // In either case we reuse it and skip session re-validation.
+    if (browser.isConnectedToExisting || browser._sessionReady) {
       const pages = await browser.pages();
       const brokerBayPage = pages.find(p => {
         const url = p.url();
-        return url.includes('brokerbay.com') && !url.includes('auth.brokerbay.com/login');
+        return url.includes('edge.brokerbay.com') && !url.includes('auth.brokerbay.com');
       });
 
       if (brokerBayPage) {
@@ -2611,7 +2614,6 @@ export async function runBookingFlow(browser, params = {}) {
         page = await browser.newPage();
       }
     } else {
-      // For a Puppeteer-launched browser, reuse first page or create new
       const pages = await browser.pages();
       page = pages.length > 0 ? pages[0] : await browser.newPage();
     }
@@ -2634,8 +2636,8 @@ export async function runBookingFlow(browser, params = {}) {
       const sessionOk = await isSessionValid(page);
       if (!sessionOk) {
         log('  ❌ [BOOKING] BrokerBay session expired — cannot book without a valid session.', 'red');
-        log('  💡 [BOOKING] Ensure the mounted Chrome profile is freshly logged in and re-deploy.', 'yellow');
-        return { success: false, bookingId: null, error: 'Session expired — re-deploy with a fresh Chrome profile' };
+        log('  💡 [BOOKING] Re-export session from the UI dashboard and re-deploy.', 'yellow');
+        return { success: false, bookingId: null, error: 'Session expired — re-export session and re-deploy' };
       }
     }
 

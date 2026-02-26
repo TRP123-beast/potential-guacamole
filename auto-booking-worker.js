@@ -69,8 +69,8 @@ const supabase = createClient(supabaseUrl, supabaseKey, {
 const db = new Database("src/data/data.db");
 
 // ==================== CONFIGURATION ====================
-const CANCEL_INTERVAL_MS = parseInt(process.env.CANCEL_INTERVAL_MINUTES || "30") * 60 * 1000;
 const ENABLE_AUTO_CANCEL = process.env.ENABLE_AUTO_CANCEL !== "false";
+const POST_BOOKING_CANCEL_DELAY_MS = 10 * 60 * 1000; // 10 minutes after queue empties
 const BROWSER_HEALTH_CHECK_MS = 60000; // Check browser health every 60s
 
 // ==================== LOGGING ====================
@@ -459,6 +459,8 @@ async function processBookingQueue() {
   } else {
     log(`\n✅ [QUEUE] Queue processed. Waiting for new records...\n`, 'green');
   }
+
+  schedulePostBookingCancellation();
 }
 
 function queueBooking(request) {
@@ -515,6 +517,22 @@ async function retryFailedAddressFetches() {
 // ==================== AUTO-CANCELLATION SWEEP ====================
 let isCancelRunning = false;
 let lastCancelRun = null;
+let pendingCancelTimer = null;
+
+function schedulePostBookingCancellation() {
+  if (!ENABLE_AUTO_CANCEL) return;
+
+  if (pendingCancelTimer) {
+    clearTimeout(pendingCancelTimer);
+  }
+
+  log(`⏰ [CANCEL] Cancellation sweep scheduled — running in 10 minutes...`, 'magenta');
+
+  pendingCancelTimer = setTimeout(async () => {
+    pendingCancelTimer = null;
+    await runAutoCancellation();
+  }, POST_BOOKING_CANCEL_DELAY_MS);
+}
 
 async function runAutoCancellation() {
   if (isCancelRunning) {
@@ -581,7 +599,7 @@ function startRealtimeListener() {
   log('⏰ [WORKER] Default booking time: 8:00 PM', 'blue');
   log('📅 [WORKER] Default booking date: Current day', 'blue');
   log('🔄 [WORKER] Retry failed address fetches: Every 60 seconds', 'blue');
-  log(`🚫 [WORKER] Auto-cancel sweep: Every ${CANCEL_INTERVAL_MS / 60000} minutes (${ENABLE_AUTO_CANCEL ? 'ENABLED' : 'DISABLED'})`, 'blue');
+  log(`🚫 [WORKER] Auto-cancel sweep: 10 min after queue empties (${ENABLE_AUTO_CANCEL ? 'ENABLED' : 'DISABLED'})`, 'blue');
   log(`🌐 [WORKER] Browser mode: ${process.env.HEADLESS !== 'false' ? 'Headless' : 'Visible'}`, 'blue');
   log('', 'reset');
 
@@ -634,20 +652,6 @@ function startRealtimeListener() {
   setInterval(() => {
     retryFailedAddressFetches();
   }, RETRY_DELAY_MS);
-
-  // Auto-cancellation sweep
-  if (ENABLE_AUTO_CANCEL) {
-    log(`🚫 [CANCEL] Scheduling auto-cancel sweep every ${CANCEL_INTERVAL_MS / 60000} minutes`, 'magenta');
-
-    // Run initial cancellation sweep after a short delay (let browser initialize first)
-    setTimeout(() => {
-      runAutoCancellation();
-    }, 30000); // 30 seconds after startup
-
-    setInterval(() => {
-      runAutoCancellation();
-    }, CANCEL_INTERVAL_MS);
-  }
 
   // Browser health check
   setInterval(() => {

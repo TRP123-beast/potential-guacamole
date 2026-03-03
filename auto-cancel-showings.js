@@ -708,250 +708,424 @@ async function performCancellation(page, showing) {
     log(`  🔍 Selecting reason: "${CONFIG.cancelReason}"`, "dim");
     let reasonSelected = false;
 
-    // Method A: native AngularJS <select> with proper $apply digest
-    const nativeSelectResult = await page.evaluate((reason) => {
-        const selects = Array.from(document.querySelectorAll("select"));
-        for (const sel of selects) {
-            if (sel.offsetParent === null) continue;
-            for (const opt of sel.options) {
-                if (opt.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
-                    sel.value = opt.value;
-                    ["input", "change"].forEach((ev) =>
-                        sel.dispatchEvent(new Event(ev, { bubbles: true }))
-                    );
-                    try {
-                        const scope =
-                            window.angular?.element(sel)?.scope?.() ||
-                            window.angular?.element(sel)?.isolateScope?.();
-                        if (scope) {
-                            const model = sel.getAttribute("ng-model");
-                            if (model) {
-                                scope.$apply(() => {
-                                    const parts = model.split(".");
-                                    let obj = scope;
-                                    for (let i = 0; i < parts.length - 1; i++) obj = obj[parts[i]];
-                                    obj[parts[parts.length - 1]] = opt.value;
-                                });
-                            }
-                        }
-                    } catch { }
-                    return { ok: true, text: opt.textContent.trim() };
-                }
-            }
-        }
-        return { ok: false };
-    }, CONFIG.cancelReason);
+    // ── Diagnostic: dump the modal's dropdown structure for debugging ──
+    const modalDiagnostic = await page.evaluate(() => {
+        const modal = document.querySelector(
+            '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
+        );
+        if (!modal) return { found: false };
 
-    if (nativeSelectResult.ok) {
-        reasonSelected = true;
-        log(`  ✓ Selected via native <select>: "${nativeSelectResult.text}"`, "dim");
-        await wait(CONFIG.shortWait);
+        const selects = Array.from(modal.querySelectorAll("select"));
+        const ngModelEls = Array.from(modal.querySelectorAll("[ng-model]"));
+        const uiSelects = modal.querySelectorAll("ui-select, .ui-select-container, [ui-select]");
+
+        return {
+            found: true,
+            selectCount: selects.length,
+            selectDetails: selects.map(sel => ({
+                id: sel.id,
+                name: sel.name,
+                ngModel: sel.getAttribute("ng-model"),
+                className: sel.className,
+                optionCount: sel.options.length,
+                options: Array.from(sel.options).map(o => ({
+                    value: o.value, text: o.textContent.trim(), selected: o.selected
+                })),
+                visible: sel.offsetParent !== null
+            })),
+            ngModels: ngModelEls.map(el => ({
+                tag: el.tagName.toLowerCase(),
+                ngModel: el.getAttribute("ng-model"),
+                className: (el.className || "").substring(0, 60)
+            })),
+            uiSelectCount: uiSelects.length,
+        };
+    });
+
+    log(`  📋 [DIAG] Modal: ${modalDiagnostic.selectCount || 0} <select>, ` +
+        `${modalDiagnostic.ngModels?.length || 0} [ng-model], ` +
+        `${modalDiagnostic.uiSelectCount || 0} ui-select`, "dim");
+    if (modalDiagnostic.selectDetails?.length > 0) {
+        for (const s of modalDiagnostic.selectDetails) {
+            log(`    [DIAG] <select> ng-model="${s.ngModel}" id="${s.id}" ` +
+                `options=${s.optionCount} visible=${s.visible}`, "dim");
+            s.options.forEach(o =>
+                log(`      option: value="${o.value}" text="${o.text}" selected=${o.selected}`, "dim")
+            );
+        }
     }
 
-    // Method B: AntD React select — uses Puppeteer real mouse events (JS .click() won't
-    // fire React synthetic events, causing the model never to update)
+    // ── Method A: Puppeteer page.select() — fires REAL CDP browser events ──
     if (!reasonSelected) {
-        log("  ⚠️  Native select not found, trying AntD dropdown with real clicks...", "yellow");
+        log("  🔍 Method A: page.select() for native <select>...", "dim");
 
-        const triggerSel = [
-            ".ant-select-selector",
-            ".ant-select:not(.ant-select-disabled) .ant-select-selector",
-            '[class*="ant-select"] [class*="selector"]',
+        const selectInfo = await page.evaluate((reason) => {
+            const modal = document.querySelector(
+                '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
+            );
+            const root = modal || document.body;
+            const selects = Array.from(root.querySelectorAll("select"));
+
+            for (const sel of selects) {
+                if (sel.offsetParent === null) continue;
+
+                // Build a unique CSS selector
+                let cssSelector = null;
+                if (sel.getAttribute("ng-model")) {
+                    cssSelector = `select[ng-model="${sel.getAttribute("ng-model")}"]`;
+                } else if (sel.id) {
+                    cssSelector = `select#${sel.id}`;
+                } else if (sel.name) {
+                    cssSelector = `select[name="${sel.name}"]`;
+                } else {
+                    cssSelector = "select";
+                }
+
+                // Find matching option by text
+                for (const opt of sel.options) {
+                    if (opt.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
+                        return {
+                            found: true,
+                            cssSelector,
+                            optionValue: opt.value,
+                            optionText: opt.textContent.trim(),
+                        };
+                    }
+                }
+            }
+            return { found: false };
+        }, CONFIG.cancelReason);
+
+        if (selectInfo.found && selectInfo.cssSelector) {
+            log(`  ✓ Found <select> at "${selectInfo.cssSelector}" ` +
+                `with option "${selectInfo.optionText}"`, "dim");
+            try {
+                // page.select() uses CDP — fires REAL browser events
+                await page.select(selectInfo.cssSelector, selectInfo.optionValue);
+                log("  ✓ page.select() executed", "dim");
+
+                // Insurance: trigger AngularJS $digest cycle
+                await page.evaluate((sel) => {
+                    const el = document.querySelector(sel);
+                    if (el && window.angular) {
+                        try {
+                            const scope = window.angular.element(el).scope() ||
+                                window.angular.element(el).isolateScope();
+                            if (scope && !scope.$$phase && !scope.$root?.$$phase) {
+                                scope.$digest();
+                            }
+                        } catch { }
+                    }
+                }, selectInfo.cssSelector);
+
+                await wait(500);
+
+                // Verify: read back selected value
+                const verified = await page.evaluate((sel, expected) => {
+                    const element = document.querySelector(sel);
+                    if (!element) return false;
+                    return element.value === expected;
+                }, selectInfo.cssSelector, selectInfo.optionValue);
+
+                if (verified) {
+                    reasonSelected = true;
+                    log(`  ✅ Method A: VERIFIED — "${selectInfo.optionText}" selected`, "green");
+                } else {
+                    log("  ⚠️  page.select() value did not stick", "yellow");
+                }
+            } catch (err) {
+                log(`  ⚠️  page.select() error: ${err.message}`, "yellow");
+            }
+        } else {
+            log("  ⚠️  No native <select> with matching option found", "yellow");
+        }
+    }
+
+    // ── Method B: Real mouse interaction for custom dropdowns ──
+    if (!reasonSelected) {
+        log("  🔍 Method B: real mouse clicks for custom dropdown...", "dim");
+
+        // B1: Find dropdown trigger via known selectors
+        const triggerSelectors = [
+            ".ui-select-toggle",
+            ".ui-select-container .ui-select-match",
+            "[ui-select] .btn",
             '[role="combobox"]',
-        ].join(", ");
+            '[role="listbox"]',
+            '[class*="select-toggle"]',
+            '[class*="select-match"]',
+        ];
 
-        let triggerEl = null;
-        for (const sel of triggerSel.split(", ")) {
+        let triggerClicked = false;
+
+        for (const sel of triggerSelectors) {
+            if (triggerClicked) break;
             try {
                 const els = await page.$$(sel);
                 for (const el of els) {
-                    const visible = await el.evaluate((n) => n.offsetParent !== null);
-                    if (visible) { triggerEl = el; break; }
+                    const visible = await el.evaluate(n => n.offsetParent !== null);
+                    if (!visible) continue;
+                    const box = await el.boundingBox();
+                    if (box) {
+                        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+                        log(`  ✓ Clicked dropdown trigger via "${sel}"`, "dim");
+                        triggerClicked = true;
+                        break;
+                    }
                 }
-                if (triggerEl) break;
             } catch { }
         }
 
-        if (triggerEl) {
-            // Use page.mouse.click with coordinates — immune to stale element handles
-            // that occur when Angular re-renders the modal after opening.
-            const triggerBox = await triggerEl.boundingBox().catch(() => null);
-            if (triggerBox) {
-                await page.mouse.click(
-                    triggerBox.x + triggerBox.width / 2,
-                    triggerBox.y + triggerBox.height / 2
+        // B1b: Fallback — find dropdown by proximity to "Reason for cancelling" label
+        if (!triggerClicked) {
+            const triggerBox = await page.evaluate(() => {
+                const modal = document.querySelector(
+                    '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
                 );
-                log("  ✓ Clicked AntD select trigger (mouse coords)", "dim");
-            } else {
-                await clickSafely(page, triggerEl, "AntD select trigger");
-            }
+                if (!modal) return null;
 
-            // AntD v4 uses display:none during open/close animation — do NOT use
-            // { visible: true } which blocks on that. Wait for DOM presence only.
-            const dropdownInDom = await page
-                .waitForSelector(".ant-select-dropdown", { timeout: 4000 })
-                .then(() => true)
-                .catch(() => false);
-
-            if (dropdownInDom) {
-                // Wait one more tick for the animation to finish and items to be clickable
-                await wait(300);
-                log("  ✓ AntD dropdown in DOM", "dim");
-
-                const optionSels = [
-                    ".ant-select-dropdown .ant-select-item-option-content",
-                    ".ant-select-dropdown .ant-select-item",
-                    ".ant-select-dropdown li",
-                    "[role='option']",
-                ];
-
-                for (const sel of optionSels) {
-                    const opts = await page.$$(sel);
-                    let matched = false;
-                    for (const opt of opts) {
-                        const text = await opt.evaluate((n) => (n.textContent || "").trim()).catch(() => "");
-                        if (!text.toLowerCase().includes(CONFIG.cancelReason.toLowerCase())) continue;
-
-                        // Use mouse.click with coords — safest for portalled elements
-                        const optBox = await opt.boundingBox().catch(() => null);
-                        if (optBox) {
-                            await page.mouse.click(
-                                optBox.x + optBox.width / 2,
-                                optBox.y + optBox.height / 2
-                            );
-                        } else {
-                            await opt.evaluate((n) => n.click());
-                        }
-
-                        reasonSelected = true;
-                        log(`  ✓ Selected via AntD mouse click: "${text}"`, "dim");
-                        matched = true;
+                // Find the "Reason for cancelling" label
+                const allEls = Array.from(modal.querySelectorAll("*"));
+                let labelEl = null;
+                for (const el of allEls) {
+                    if (el.children.length > 3) continue;
+                    const t = (el.textContent || "").trim().toLowerCase();
+                    if (t.includes("reason for cancelling") || t === "reason for cancelling") {
+                        labelEl = el;
                         break;
                     }
-                    if (matched) break;
                 }
-            } else {
-                log("  ⚠️  AntD dropdown did not appear — trying keyboard nav", "yellow");
-            }
+                if (!labelEl) return null;
 
-            // Keyboard fallback: ArrowDown to navigate options + Enter to confirm.
-            // Works whether the dropdown is open or not (re-opens if needed).
-            if (!reasonSelected) {
-                log("  ⚠️  Trying keyboard navigation on select...", "yellow");
-                await page.keyboard.press("ArrowDown");
-                await wait(400);
+                const labelRect = labelEl.getBoundingClientRect();
+                const candidates = Array.from(modal.querySelectorAll(
+                    'select, [class*="select"], [role="combobox"], [role="listbox"], ' +
+                    'button, [class*="dropdown"], .form-control, input'
+                ));
 
-                // Check if matching text is now highlighted in the dropdown
-                const textFound = await page.evaluate((reason) => {
-                    const activeOpt = document.querySelector(
-                        ".ant-select-item-option-active, .ant-select-item-option-selected, [aria-selected='true']"
-                    );
-                    if (activeOpt && activeOpt.textContent.toLowerCase().includes(reason.toLowerCase())) {
-                        return true;
-                    }
-                    // Navigate all options looking for the one matching our reason
-                    const all = Array.from(document.querySelectorAll(
-                        ".ant-select-item, [role='option'], .ant-select-item-option"
-                    ));
-                    return all.some((el) => el.textContent.toLowerCase().includes(reason.toLowerCase()));
-                }, CONFIG.cancelReason);
-
-                if (textFound) {
-                    // Keep pressing ArrowDown until the target option is focused
-                    for (let i = 0; i < 5; i++) {
-                        const isFocused = await page.evaluate((reason) => {
-                            const active = document.querySelector(
-                                ".ant-select-item-option-active, [aria-selected='true']"
-                            );
-                            return !!(active && active.textContent.toLowerCase().includes(reason.toLowerCase()));
-                        }, CONFIG.cancelReason);
-
-                        if (isFocused) {
-                            await page.keyboard.press("Enter");
-                            reasonSelected = true;
-                            log("  ✓ Selected via keyboard ArrowDown + Enter", "dim");
-                            break;
-                        }
-                        await page.keyboard.press("ArrowDown");
-                        await wait(200);
-                    }
+                let closest = null;
+                let closestDist = Infinity;
+                for (const c of candidates) {
+                    if (c.offsetParent === null) continue;
+                    const r = c.getBoundingClientRect();
+                    if (r.top < labelRect.top - 10) continue;
+                    const dist = Math.abs(r.top - labelRect.bottom) + Math.abs(r.left - labelRect.left);
+                    if (dist < closestDist) { closestDist = dist; closest = c; }
                 }
+
+                if (closest) {
+                    const r = closest.getBoundingClientRect();
+                    return { x: r.x + r.width / 2, y: r.y + r.height / 2, tag: closest.tagName };
+                }
+                return null;
+            });
+
+            if (triggerBox) {
+                await page.mouse.click(triggerBox.x, triggerBox.y);
+                log(`  ✓ Clicked dropdown trigger near label (<${triggerBox.tag}>)`, "dim");
+                triggerClicked = true;
             }
         }
 
-        if (!reasonSelected) {
-            await wait(CONFIG.shortWait);
+        if (triggerClicked) {
+            await wait(800);
+
+            // B2: Find and click the matching option
+            const optionBox = await page.evaluate((reason) => {
+                const optionSels = [
+                    ".ui-select-choices-row", ".ui-select-choices-row-inner",
+                    ".ui-select-choices li", '[role="option"]',
+                    ".dropdown-menu li", ".dropdown-item",
+                    "li", "div[class*='option']", "span[class*='option']",
+                ];
+                for (const sel of optionSels) {
+                    const opts = Array.from(document.querySelectorAll(sel));
+                    for (const opt of opts) {
+                        if (opt.offsetParent === null) continue;
+                        const t = (opt.textContent || "").trim();
+                        if (t.toLowerCase().includes(reason.toLowerCase())) {
+                            const r = opt.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) {
+                                return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: t };
+                            }
+                        }
+                    }
+                }
+                return null;
+            }, CONFIG.cancelReason);
+
+            if (optionBox) {
+                await page.mouse.click(optionBox.x, optionBox.y);
+                log(`  ✓ Clicked option "${optionBox.text}" via real mouse`, "dim");
+                await wait(500);
+                reasonSelected = true;
+            } else {
+                log("  ⚠️  Dropdown opened but no matching option found", "yellow");
+                await page.keyboard.press("Escape");
+                await wait(300);
+            }
+        } else {
+            log("  ⚠️  No custom dropdown trigger found", "yellow");
         }
     }
 
-    // Method C: AngularJS scope force-set — directly mutate the model through $apply
+    // ── Method C: AngularJS scope injection with verified model readback ──
     if (!reasonSelected) {
-        log("  ⚠️  AntD method failed, trying Angular scope injection...", "yellow");
+        log("  🔍 Method C: Angular scope injection with verification...", "dim");
+
         const scopeResult = await page.evaluate((reason) => {
-            if (!window.angular) return { ok: false };
-            const allInputs = Array.from(document.querySelectorAll(
-                "[ng-model], select, [ng-change], [class*='select'], [role='combobox']"
-            ));
-            for (const el of allInputs) {
+            if (!window.angular) return { ok: false, info: "no_angular" };
+
+            const modal = document.querySelector(
+                '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
+            );
+            const root = modal || document.body;
+            const ngModelEls = Array.from(root.querySelectorAll("[ng-model]"));
+
+            for (const el of ngModelEls) {
                 if (el.offsetParent === null) continue;
+                const ngModel = el.getAttribute("ng-model");
+                if (!ngModel) continue;
+
                 try {
-                    const scope =
-                        window.angular.element(el).scope() ||
+                    const scope = window.angular.element(el).scope() ||
                         window.angular.element(el).isolateScope();
                     if (!scope) continue;
-                    const model = el.getAttribute("ng-model") || "cancellationReason";
+
+                    // For <select>, use the option value; for text fields, use the reason string
+                    let valueToSet = reason;
+                    if (el.tagName === "SELECT") {
+                        for (const opt of el.options) {
+                            if (opt.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
+                                valueToSet = opt.value;
+                                break;
+                            }
+                        }
+                    }
+
+                    const parts = ngModel.split(".");
                     scope.$apply(() => {
-                        const parts = model.split(".");
                         let obj = scope;
                         for (let i = 0; i < parts.length - 1; i++) {
                             if (!obj[parts[i]]) obj[parts[i]] = {};
                             obj = obj[parts[i]];
                         }
-                        obj[parts[parts.length - 1]] = reason;
+                        obj[parts[parts.length - 1]] = valueToSet;
                     });
-                    return { ok: true };
+
+                    // Verify: read back the model value
+                    let readBack = scope;
+                    for (const part of parts) readBack = readBack?.[part];
+
+                    if (readBack === valueToSet) {
+                        return { ok: true, ngModel, valueSet: valueToSet };
+                    }
                 } catch { }
             }
-            return { ok: false };
+            return { ok: false, info: "no_model_accepted" };
         }, CONFIG.cancelReason);
 
         if (scopeResult.ok) {
             reasonSelected = true;
-            log("  ✓ Reason injected via Angular scope", "dim");
+            log(`  ✓ Scope injection: ng-model="${scopeResult.ngModel}" value="${scopeResult.valueSet}"`, "dim");
             await wait(CONFIG.shortWait);
+        } else {
+            log(`  ⚠️  Scope injection failed: ${scopeResult.info}`, "yellow");
         }
     }
 
-    // Method D: last-resort direct text click (only within visible modal context)
+    // ── Method D: Keyboard navigation ──
     if (!reasonSelected) {
-        log("  ⚠️  Scope injection failed, trying modal-scoped text click...", "yellow");
-        const directClicked = await page.evaluate((reason) => {
+        log("  🔍 Method D: keyboard focus + ArrowDown navigation...", "dim");
+
+        const dropdownFocused = await page.evaluate(() => {
             const modal = document.querySelector(
-                '.ant-modal-body, [class*="modal-body"], [class*="modal-content"], [role="dialog"]'
+                '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
             );
-            const searchRoot = modal || document.body;
-            const all = Array.from(searchRoot.querySelectorAll("li, div, span, option"));
-            for (const el of all) {
-                if (el.offsetParent === null) continue;
-                if (el.children.length > 3) continue;
-                const t = (el.textContent || "").trim();
-                if (t.toLowerCase().includes(reason.toLowerCase())) {
-                    el.click();
-                    return { ok: true, text: t };
+            if (!modal) return false;
+            const focusable = modal.querySelector(
+                'select, [role="combobox"], [role="listbox"], [tabindex], ' +
+                '.ui-select-toggle, [class*="select"]'
+            );
+            if (focusable && focusable.offsetParent !== null) {
+                focusable.focus();
+                return true;
+            }
+            return false;
+        });
+
+        if (dropdownFocused) {
+            await page.keyboard.press("Space");
+            await wait(300);
+
+            for (let i = 0; i < 15; i++) {
+                await page.keyboard.press("ArrowDown");
+                await wait(150);
+
+                const currentOption = await page.evaluate((reason) => {
+                    const sel = document.activeElement;
+                    if (sel?.tagName === "SELECT") {
+                        const cur = sel.options[sel.selectedIndex];
+                        if (cur?.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
+                            return cur.textContent.trim();
+                        }
+                    }
+                    const active = document.querySelector(
+                        '[aria-selected="true"], .active, .ui-select-choices-row.active, .selected'
+                    );
+                    if (active?.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
+                        return active.textContent.trim();
+                    }
+                    return null;
+                }, CONFIG.cancelReason);
+
+                if (currentOption) {
+                    await page.keyboard.press("Enter");
+                    log(`  ✓ Selected "${currentOption}" via keyboard`, "dim");
+                    await wait(500);
+                    reasonSelected = true;
+                    break;
                 }
             }
-            return { ok: false };
-        }, CONFIG.cancelReason);
 
-        if (directClicked.ok) {
-            reasonSelected = true;
-            log(`  ✓ Selected via modal text click: "${directClicked.text}"`, "dim");
-            await wait(CONFIG.shortWait);
+            if (!reasonSelected) {
+                log("  ⚠️  Keyboard navigation did not find option", "yellow");
+                await page.keyboard.press("Escape");
+                await wait(300);
+            }
+        }
+    }
+
+    // ── VERIFICATION GATE: Check if "Cancel Showing" button became enabled ──
+    if (reasonSelected) {
+        log("  🔍 Verifying: checking if Cancel Showing button is enabled...", "dim");
+        await wait(800);
+
+        const buttonEnabled = await page.evaluate(() => {
+            const candidates = Array.from(document.querySelectorAll(
+                'button, a, [role="button"], input[type="submit"]'
+            ));
+            for (const el of candidates) {
+                if (el.offsetParent === null) continue;
+                const t = (el.textContent || el.value || "").trim().toLowerCase();
+                if (!t.includes("cancel showing")) continue;
+                return !el.disabled && !el.classList.contains("disabled") &&
+                    !el.getAttribute("disabled") && el.getAttribute("aria-disabled") !== "true";
+            }
+            return false;
+        });
+
+        if (buttonEnabled) {
+            log("  ✅ VERIFIED: Cancel Showing button is enabled — reason accepted", "green");
+        } else {
+            log("  ⚠️  VERIFICATION FAILED: Cancel Showing button still disabled", "yellow");
+            reasonSelected = false;
+            await takeScreenshot(page, "cancel_03_verification_failed");
         }
     }
 
     if (!reasonSelected) {
-        log("  ❌ Could not select cancellation reason", "red");
+        log("  ❌ Could not select cancellation reason (all methods failed verification)", "red");
         await takeScreenshot(page, "cancel_err_no_reason");
         await dismissModalIfOpen(page);
         return false;

@@ -2,23 +2,22 @@
 
 /**
  * ===========================================================================
- *  AUTO-BOOKING WORKER (v2 — In-Process Booking + Auto-Cancel)
+ *  AUTO-BOOKING WORKER (v3 — In-Process Booking, Scheduled Only)
  * ===========================================================================
  *
  *  Architecture:
  *    1. Initializes a SHARED headless Chromium browser (singleton via session-manager)
  *    2. Listens for INSERT events on the Supabase `showing_requests` table
- *    3. For each new showing request:
+ *    3. For each new showing request with status "scheduled":
  *       a) Fetches the property address from the property API
  *       b) Runs the booking flow IN-PROCESS (via runBookingFlow from auto-book-enhanced)
  *       c) Updates the local SQLite database with booking status
- *    4. Every 30 minutes, runs a cancellation sweep to cancel auto-booked showings
- *    5. Periodically checks browser health and restarts if needed
+ *    4. Periodically checks browser health and restarts if needed
  *
- *  Key improvements over v1:
+ *  Key behaviours:
+ *    - Only processes showing requests with status "scheduled"
  *    - No child process spawning — booking runs in the same process using shared browser
- *    - Auto-cancellation sweep every 30 minutes
- *    - Structured logging with [WORKER], [BOOKING], [CANCEL], [QUEUE], [SUPABASE] prefixes
+ *    - Structured logging with [WORKER], [BOOKING], [QUEUE], [SUPABASE] prefixes
  *    - Browser health monitoring and auto-recovery
  *
  * ===========================================================================
@@ -31,7 +30,7 @@ import Database from "better-sqlite3";
 import axios from "axios";
 import { getSharedBrowser, closeSharedBrowser, isBrowserAlive } from "./src/session-manager.js";
 import { runBookingFlow } from "./auto-book-enhanced.js";
-import { runCancellationSweep } from "./auto-cancel-showings.js";
+// import { runCancellationSweep } from "./auto-cancel-showings.js";
 
 configDotenv();
 
@@ -69,8 +68,6 @@ const supabase = createClient(supabaseUrl, supabaseKey, {
 const db = new Database("src/data/data.db");
 
 // ==================== CONFIGURATION ====================
-const ENABLE_AUTO_CANCEL = process.env.ENABLE_AUTO_CANCEL !== "false";
-const POST_BOOKING_CANCEL_DELAY_MS = 10 * 60 * 1000; // 10 minutes after queue empties
 const BROWSER_HEALTH_CHECK_MS = 60000; // Check browser health every 60s
 
 // ==================== LOGGING ====================
@@ -460,10 +457,16 @@ async function processBookingQueue() {
     log(`\n✅ [QUEUE] Queue processed. Waiting for new records...\n`, 'green');
   }
 
-  schedulePostBookingCancellation();
 }
 
 function queueBooking(request) {
+  // Only auto-book requests with status "scheduled"
+  const status = (request.status || "").toLowerCase();
+  if (status !== "scheduled") {
+    log(`  ⏭️  [QUEUE] Skipping — status "${request.status}" is not "scheduled": ${request.id}`, 'yellow');
+    return;
+  }
+
   if (isAlreadyProcessed(request.id)) {
     log(`  ⏭️  [QUEUE] Already processed: ${request.id}`, 'yellow');
     return;
@@ -514,67 +517,6 @@ async function retryFailedAddressFetches() {
   }
 }
 
-// ==================== AUTO-CANCELLATION SWEEP ====================
-let isCancelRunning = false;
-let lastCancelRun = null;
-let pendingCancelTimer = null;
-
-function schedulePostBookingCancellation() {
-  if (!ENABLE_AUTO_CANCEL) return;
-
-  if (pendingCancelTimer) {
-    clearTimeout(pendingCancelTimer);
-  }
-
-  log(`⏰ [CANCEL] Cancellation sweep scheduled — running in 10 minutes...`, 'magenta');
-
-  pendingCancelTimer = setTimeout(async () => {
-    pendingCancelTimer = null;
-    await runAutoCancellation();
-  }, POST_BOOKING_CANCEL_DELAY_MS);
-}
-
-async function runAutoCancellation() {
-  if (isCancelRunning) {
-    log('⏭️  [CANCEL] Cancellation sweep already running, skipping...', 'yellow');
-    return;
-  }
-
-  if (!ENABLE_AUTO_CANCEL) {
-    return;
-  }
-
-  isCancelRunning = true;
-  const startTime = Date.now();
-
-  try {
-    log(`\n${'='.repeat(70)}`, 'magenta');
-    log('🚫 [CANCEL] Starting scheduled auto-cancellation sweep', 'magenta');
-    log(`${'='.repeat(70)}`, 'magenta');
-
-    const browser = await ensureBrowser();
-    const stats = await runCancellationSweep(browser);
-
-    lastCancelRun = {
-      timestamp: new Date().toISOString(),
-      duration: Date.now() - startTime,
-      ...stats
-    };
-
-    log(`🚫 [CANCEL] Sweep completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s — cancelled: ${stats.cancelled}, failed: ${stats.failed}`, 'magenta');
-
-  } catch (error) {
-    log(`❌ [CANCEL] Sweep error: ${error.message}`, 'red');
-    lastCancelRun = {
-      timestamp: new Date().toISOString(),
-      duration: Date.now() - startTime,
-      error: error.message
-    };
-  } finally {
-    isCancelRunning = false;
-  }
-}
-
 // ==================== BROWSER HEALTH CHECK ====================
 async function checkBrowserHealth() {
   if (!isBrowserAlive()) {
@@ -592,14 +534,13 @@ async function checkBrowserHealth() {
 function startRealtimeListener() {
   log('', 'reset');
   log('╔═══════════════════════════════════════════════════════════════════╗', 'cyan');
-  log('║  🤖 Auto-Booking Worker v2 (In-Process + Auto-Cancel)           ║', 'cyan');
+  log('║  🤖 Auto-Booking Worker v3 (In-Process, Scheduled Only)         ║', 'cyan');
   log('╚═══════════════════════════════════════════════════════════════════╝', 'cyan');
   log('', 'reset');
-  log('🎯 [SUPABASE] Listening for new showing_requests insertions...', 'blue');
+  log('🎯 [SUPABASE] Listening for new showing_requests insertions (status: "scheduled" only)...', 'blue');
   log('⏰ [WORKER] Default booking time: 8:00 PM', 'blue');
   log('📅 [WORKER] Default booking date: Current day', 'blue');
   log('🔄 [WORKER] Retry failed address fetches: Every 60 seconds', 'blue');
-  log(`🚫 [WORKER] Auto-cancel sweep: 10 min after queue empties (${ENABLE_AUTO_CANCEL ? 'ENABLED' : 'DISABLED'})`, 'blue');
   log(`🌐 [WORKER] Browser mode: ${process.env.HEADLESS !== 'false' ? 'Headless' : 'Visible'}`, 'blue');
   log('', 'reset');
 
@@ -619,6 +560,11 @@ function startRealtimeListener() {
         log(`   ID: ${payload.new.id}`, 'cyan');
         log(`   Property ID: ${payload.new.property_id}`, 'cyan');
         log(`   Status: ${payload.new.status}`, 'cyan');
+
+        if ((payload.new.status || "").toLowerCase() !== "scheduled") {
+          log(`   ⏭️  Ignoring — only "scheduled" status triggers auto-booking`, 'yellow');
+          return;
+        }
 
         queueBooking(payload.new);
       }
@@ -670,7 +616,7 @@ async function fetchExistingUnprocessedRequests() {
   const { data, error } = await supabase
     .from("showing_requests")
     .select("id, user_id, property_id, status, created_at, scheduled_date, scheduled_time, group_name")
-    .in("status", ["pending", "scheduled", "rescheduled"])
+    .eq("status", "scheduled")
     .order("created_at", { ascending: true });
 
   if (error) {

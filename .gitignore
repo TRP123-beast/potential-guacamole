@@ -11,6 +11,7 @@ src/data/*.db
 src/data/*.db-shm
 src/data/*.db-wal
 src/data/screenshots/*.png
+src/data/exported-session.json
 
 # Chrome profile (contains saved credentials)
 chrome-profile/

@@ -2,59 +2,39 @@
 
 /**
  * ============================================================================
- *  AUTO-CANCEL SHOWINGS SCRIPT
+ *  AUTO-CANCEL SHOWINGS  (v3 — URL-direct navigation)
  * ============================================================================
  *
- *  Purpose:
- *    Systematically cancels all active showings on BrokerBay's buyer showings
- *    page that have a status of Confirmed, Pending, or Awaiting Approval.
+ *  CLI usage:
+ *    node auto-cancel-showings.js                          # cancel ALL targeted showings
+ *    node auto-cancel-showings.js --dry-run                # list only, no cancellations
+ *    node auto-cancel-showings.js "42 Iangrove Terrace"    # cancel ONE specific property
+ *    node auto-cancel-showings.js --dry-run "42 Iangrove"  # dry-run for one property
+ *
+ *  Targeted statuses:  Confirmed | Awaiting Approval | Pending
+ *  Skip statuses:      Cancelled (already done)
+ *  Cancel reason:      "Client is no longer interested"
  *
  *  How it works:
- *    1. Connects to an existing Chrome browser session (via DevTools Protocol)
- *       or launches a new one with a persistent profile.
- *    2. Validates the session – ensures the user is logged in to BrokerBay.
- *    3. Navigates to the showings/buyer page.
- *    4. Scans every pagination page for showing rows whose status badge
- *       matches one of the targeted tags.
- *    5. For each targeted showing it:
- *       a) Clicks the row → opens the showing detail page.
- *       b) Clicks the "Cancel" button.
- *       c) Selects "Client is no longer interested" from the reason dropdown.
- *       d) Clicks "Cancel Showing" to confirm.
- *       e) Waits for the "Showing Cancelled" confirmation.
- *       f) Takes a screenshot as proof.
- *       g) Navigates back to the showings list.
- *    6. After one full pass, does a verification sweep across all pages to
- *       confirm that zero Confirmed/Pending/Awaiting Approval showings remain.
- *    7. Logs a structured summary with counts and any errors.
- *
- *  Usage:
- *    node auto-cancel-showings.js [--dry-run]
- *
- *    --dry-run   Scan and report showings that would be cancelled, but do
- *                not actually cancel anything.
- *
- *  Edge cases handled:
- *    • Pagination – walks through every page in the pagination bar.
- *    • Empty list / no matching showings – exits gracefully.
- *    • Slow-loading pages – generous timeouts with polling loops.
- *    • Stale DOM references – re-queries elements after navigation.
- *    • Dialog not appearing – retries once, then skips with error log.
- *    • Dropdown option not matching exactly – case-insensitive text search.
- *    • Network/browser disconnect – catches top-level errors and prints
- *      a summary of work completed before the failure.
- *    • Already-cancelled showings mixed in – skips them.
+ *   1. Connects to the existing Chrome session (port 9222 CDP) — same approach
+ *      as auto-book-enhanced.js.  Falls back to launching a new browser with
+ *      the exported-session.json cookies if no browser is found on port 9222.
+ *   2. Navigates to https://edge.brokerbay.com/#/my_business/showings/buyer
+ *   3. Scans every pagination page using TEXT-CONTENT matching for status
+ *      badges — not fragile CSS class selectors.
+ *   4. For each targeted showing it EXTRACTS THE DETAIL URL from the DOM
+ *      (href, ui-sref, or by monitoring the hash after a click), then
+ *      navigates DIRECTLY to that URL rather than clicking by DOM index.
+ *   5. On the detail page: Cancel → select reason → Cancel Showing → verify.
+ *   6. Exports runCancellationSweep() for use by the auto-booking worker.
  *
  * ============================================================================
  */
 
 import { configDotenv } from "dotenv";
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import fs from "fs/promises";
-import { launchWithSession, validateSessionOrPrompt, isSessionValid } from "./src/session-manager.js";
+import { launchWithSession, isSessionValid } from "./src/session-manager.js";
 
-puppeteer.use(StealthPlugin());
 configDotenv();
 
 // ========================== CONFIGURATION ==========================
@@ -62,67 +42,62 @@ const CONFIG = {
     showingsUrl: "https://edge.brokerbay.com/#/my_business/showings/buyer",
     screenshotDir: "src/data/screenshots",
     viewport: { width: 1920, height: 1080 },
-    navigationTimeout: 60000,   // 1 minute for page loads
-    elementTimeout: 15000,      // 15s for elements to appear
-    shortWait: 1000,            // 1s quick pauses
-    mediumWait: 2000,           // 2s standard pause
-    longWait: 5000,             // 5s page-load settle
+    navigationTimeout: 60000,
+    elementTimeout: 20000,
+    shortWait: 800,
+    mediumWait: 2000,
+    longWait: 5000,
     cancelReason: "Client is no longer interested",
     targetedTags: ["confirmed", "pending", "awaiting approval"],
 };
 
-const DRY_RUN = process.argv.includes("--dry-run");
+// ========================== CLI ARG PARSING ==========================
+const rawArgs = process.argv.slice(2);
+const DRY_RUN = rawArgs.includes("--dry-run");
+const ADDRESS_FLAG_IDX = rawArgs.indexOf("--address");
+let TARGET_ADDRESS = null;
+if (ADDRESS_FLAG_IDX !== -1 && rawArgs[ADDRESS_FLAG_IDX + 1]) {
+    TARGET_ADDRESS = rawArgs[ADDRESS_FLAG_IDX + 1].trim().toLowerCase();
+} else {
+    const positional = rawArgs.filter((a) => !a.startsWith("--"));
+    if (positional.length > 0) {
+        TARGET_ADDRESS = positional[0].trim().toLowerCase();
+    }
+}
 
-// Only run as CLI when executed directly (not when imported)
-const _isMainModule = process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/').split('/').pop());
+const _isMainModule =
+    process.argv[1] &&
+    import.meta.url.endsWith(
+        process.argv[1].replace(/\\/g, "/").split("/").pop()
+    );
 
-// ========================== ANSI COLORS ==========================
+// ========================== ANSI COLOURS ==========================
 const C = {
-    reset: "\x1b[0m",
-    bright: "\x1b[1m",
-    dim: "\x1b[2m",
-    red: "\x1b[31m",
-    green: "\x1b[32m",
-    yellow: "\x1b[33m",
-    blue: "\x1b[34m",
-    magenta: "\x1b[35m",
-    cyan: "\x1b[36m",
-    white: "\x1b[37m",
+    reset: "\x1b[0m", bright: "\x1b[1m", dim: "\x1b[2m",
+    red: "\x1b[31m", green: "\x1b[32m", yellow: "\x1b[33m",
+    blue: "\x1b[34m", magenta: "\x1b[35m", cyan: "\x1b[36m", white: "\x1b[37m",
 };
-
 function log(msg, color = "white") {
     console.log(`${C[color] || ""}${msg}${C.reset}`);
 }
 
-function logStep(step, msg, status = "info") {
-    const icons = { info: "🔍", success: "✅", error: "❌", warning: "⚠️", cancel: "🚫" };
-    const colors = { info: "cyan", success: "green", error: "red", warning: "yellow", cancel: "magenta" };
-    log(`${icons[status] || "•"} [Step ${step}] ${msg}`, colors[status] || "white");
-}
-
 // ========================== HELPERS ==========================
-
-async function wait(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function takeScreenshot(page, name) {
     try {
         await fs.mkdir(CONFIG.screenshotDir, { recursive: true });
         const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-        const filepath = `${CONFIG.screenshotDir}/${name}_${ts}.png`;
-        await page.screenshot({ path: filepath, fullPage: true });
-        log(`  📸 Screenshot saved: ${filepath}`, "dim");
-        return filepath;
+        const fp = `${CONFIG.screenshotDir}/${name}_${ts}.png`;
+        await page.screenshot({ path: fp, fullPage: true });
+        log(`  📸 ${fp}`, "dim");
+        return fp;
     } catch (err) {
-        log(`  ⚠️  Screenshot failed: ${err.message}`, "yellow");
+        log(`  ⚠️  screenshot failed: ${err.message}`, "yellow");
         return null;
     }
 }
 
-/**
- * Wait for a selector to appear, returning true/false (never throws).
- */
 async function waitForElement(page, selector, timeout = CONFIG.elementTimeout) {
     try {
         await page.waitForSelector(selector, { timeout, visible: true });
@@ -133,164 +108,171 @@ async function waitForElement(page, selector, timeout = CONFIG.elementTimeout) {
 }
 
 /**
- * Click an element with multiple fallback strategies.
+ * Scroll an element into view and click it using three fallback strategies.
  */
 async function clickSafely(page, element, description = "element") {
     try {
         await element.evaluate((el) =>
-            el.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" })
+            el.scrollIntoView({ behavior: "smooth", block: "center" })
         );
         await wait(300);
         await element.click({ delay: 50 });
         log(`  ✓ Clicked ${description}`, "dim");
         return true;
-    } catch (err) {
-        log(`  ⚠️  Direct click failed on ${description}: ${err.message}`, "yellow");
-        // Fallback 1: mouse coordinates
+    } catch {
         try {
             const box = await element.boundingBox();
             if (box) {
-                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 50 });
-                log(`  ✓ Clicked ${description} via mouse coordinates`, "dim");
+                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+                log(`  ✓ Clicked ${description} via mouse coords`, "dim");
                 return true;
             }
         } catch { }
-        // Fallback 2: DOM click
         try {
             await page.evaluate((el) => el.click(), element);
             log(`  ✓ Clicked ${description} via DOM .click()`, "dim");
             return true;
-        } catch (domErr) {
-            log(`  ❌ All click strategies failed for ${description}: ${domErr.message}`, "red");
+        } catch (e) {
+            log(`  ❌ All click strategies failed for ${description}: ${e.message}`, "red");
             return false;
         }
     }
 }
 
-/**
- * Find a visible element whose text content includes `text` (case-insensitive).
- * Searches across given CSS selectors.
- */
-async function findElementByText(page, selectors, text) {
-    const lowerText = text.toLowerCase();
-    for (const selector of selectors) {
-        const elements = await page.$$(selector);
-        for (const el of elements) {
-            const elText = await page.evaluate((e) => (e.textContent || "").trim(), el).catch(() => "");
-            if (elText.toLowerCase().includes(lowerText)) {
-                // Check visibility
-                const visible = await page.evaluate((e) => {
-                    const r = e.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0 && e.offsetParent !== null;
-                }, el).catch(() => false);
-                if (visible) return el;
-            }
-        }
+// ========================== PAGE LOAD HELPERS ==========================
+
+async function waitForShowingsList(page) {
+    const start = Date.now();
+    while (Date.now() - start < 20000) {
+        const ready = await page.evaluate(() => {
+            const body = document.body.innerText || "";
+            // Showings page has loaded if we can see a status badge text
+            const hasContent =
+                body.includes("Confirmed") ||
+                body.includes("Awaiting Approval") ||
+                body.includes("Pending") ||
+                body.includes("Cancelled") ||
+                body.includes("No showings") ||
+                body.includes("no results");
+            return hasContent;
+        });
+        if (ready) return true;
+        await wait(800);
     }
-    return null;
+    return false;
 }
 
-// ========================== SHOWINGS PAGE LOGIC ==========================
-
 /**
- * Navigate to the showings/buyer page and wait for the list to load.
+ * Dismiss the cancellation confirmation modal if it is currently open.
+ * Tries "Back" button first, then Escape key. This MUST be called before any
+ * page navigation after a failed cancellation so the modal overlay is gone and
+ * Angular routing is unblocked for the next iteration.
  */
-async function navigateToShowings(page) {
-    logStep("1", "Navigating to showings page", "info");
+async function dismissModalIfOpen(page) {
+    const isOpen = await page.evaluate(() => {
+        return !!(
+            document.querySelector('.ant-modal, .ant-modal-wrap, [role="dialog"]') ||
+            document.body.innerText.includes("Reason for cancelling") ||
+            document.body.innerText.includes("Are you sure you want to cancel")
+        );
+    });
 
+    if (!isOpen) return;
+
+    log("  🔄 Dismissing open modal...", "dim");
+
+    const clicked = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+        for (const btn of btns) {
+            if (btn.offsetParent === null) continue;
+            const t = (btn.textContent || "").trim().toLowerCase();
+            if (t === "back") { btn.click(); return "back"; }
+        }
+        const closeBtn = document.querySelector(
+            '.ant-modal-close, [aria-label="Close"], .ant-modal-close-x'
+        );
+        if (closeBtn && closeBtn.offsetParent !== null) { closeBtn.click(); return "close"; }
+        return null;
+    });
+
+    if (!clicked) {
+        await page.keyboard.press("Escape");
+    }
+
+    await wait(CONFIG.mediumWait);
+    log(`  ✓ Modal dismissed (${clicked || "Escape"})`, "dim");
+}
+
+async function navigateToShowings(page) {
+    await dismissModalIfOpen(page);
+    log("  🔍 Navigating to showings list...", "cyan");
     await page.goto(CONFIG.showingsUrl, {
         waitUntil: "domcontentloaded",
         timeout: CONFIG.navigationTimeout,
     });
-
     await wait(CONFIG.longWait);
-
-    // Wait for showing rows or an "empty" indicator to appear
-    const hasContent = await page.evaluate(() => {
-        return new Promise((resolve) => {
-            let elapsed = 0;
-            const interval = setInterval(() => {
-                // Look for showing rows (they contain property images + text)
-                const rows = document.querySelectorAll(
-                    '.showing-event, [ng-repeat*="showing"], .list-group-item, .card, tr'
-                );
-                // Also look for a "No showings" message
-                const bodyText = document.body.innerText || "";
-                if (rows.length > 0 || bodyText.includes("No showings") || bodyText.includes("no results")) {
-                    clearInterval(interval);
-                    resolve(true);
-                }
-                elapsed += 500;
-                if (elapsed > 15000) {
-                    clearInterval(interval);
-                    resolve(false);
-                }
-            }, 500);
-        });
-    });
-
-    if (!hasContent) {
-        log("  ⚠️  Page content may not have fully loaded, proceeding anyway", "yellow");
-    }
-
-    await takeScreenshot(page, "cancel_01_showings_page");
-    logStep("1", "Showings page loaded", "success");
+    await waitForShowingsList(page);
+    log(`  ✓ Showings list loaded: ${page.url()}`, "dim");
 }
 
+// ========================== PAGINATION ==========================
+
 /**
- * Get the total number of pagination pages.
- * Returns an array of page numbers, e.g. [1, 2, 3].
- * Falls back to [1] if no pagination is found.
+ * Returns the max page number visible in the pagination bar.
+ * Returns 1 if no pagination found.
  */
-async function getPaginationPages(page) {
-    const pages = await page.evaluate(() => {
-        // Look for pagination links – BrokerBay uses a simple <ul> with page numbers
-        const pageLinks = document.querySelectorAll(
-            'ul.pagination li a, .pagination a, nav[aria-label*="pagination"] a, [ng-click*="page"] a, ul.pagination li'
-        );
+async function getTotalPages(page) {
+    return page.evaluate(() => {
+        // Strategy 1: look for numbered pagination links
+        const selectors = [
+            "ul.pagination li a",
+            ".pagination a",
+            "nav[aria-label*='pagination'] a",
+            "[class*='pagination'] [class*='page']",
+            "[class*='pager'] a",
+        ];
+        const nums = new Set();
+        for (const sel of selectors) {
+            document.querySelectorAll(sel).forEach((el) => {
+                const n = parseInt((el.textContent || "").trim(), 10);
+                if (!isNaN(n) && n > 0) nums.add(n);
+            });
+        }
+        if (nums.size > 0) return Math.max(...nums);
 
-        const pageNumbers = new Set();
-        pageLinks.forEach((el) => {
-            const text = (el.textContent || "").trim();
-            const num = parseInt(text, 10);
-            if (!isNaN(num) && num > 0) pageNumbers.add(num);
-        });
+        // Strategy 2: look for "Page X of Y" text
+        const body = document.body.innerText || "";
+        const match = body.match(/page\s+\d+\s+of\s+(\d+)/i);
+        if (match) return parseInt(match[1], 10);
 
-        if (pageNumbers.size === 0) return [1];
-        return Array.from(pageNumbers).sort((a, b) => a - b);
+        return 1;
     });
-
-    log(`  📄 Found ${pages.length} pagination page(s): [${pages.join(", ")}]`, "dim");
-    return pages;
 }
 
 /**
- * Navigate to a specific pagination page number.
- * Returns true if navigation happened, false if already on that page.
+ * Navigate to a specific pagination page. Returns true if clicked.
  */
 async function goToPage(page, pageNum) {
+    if (pageNum === 1) return true;
+
     const clicked = await page.evaluate((num) => {
-        const links = document.querySelectorAll(
-            'ul.pagination li a, .pagination a, nav[aria-label*="pagination"] a'
+        const candidates = document.querySelectorAll(
+            "ul.pagination li a, .pagination a, [class*='pagination'] a, [class*='pager'] a"
         );
-        for (const link of links) {
-            const text = (link.textContent || "").trim();
-            if (text === String(num)) {
-                // Check if parent <li> has .active class (already on this page)
-                const li = link.closest("li");
-                if (li && li.classList.contains("active")) return "already";
-                link.click();
+        for (const el of candidates) {
+            if ((el.textContent || "").trim() === String(num)) {
+                const li = el.closest("li");
+                if (li?.classList.contains("active")) return "already";
+                el.click();
                 return "clicked";
             }
         }
-        // Try <li> elements directly (some Angular UIs)
-        const lis = document.querySelectorAll("ul.pagination li");
+        // Try <li> direct click
+        const lis = document.querySelectorAll("ul.pagination li, [class*='pagination'] li");
         for (const li of lis) {
-            const text = (li.textContent || "").trim();
-            if (text === String(num)) {
+            if ((li.textContent || "").trim() === String(num)) {
                 if (li.classList.contains("active")) return "already";
-                const a = li.querySelector("a") || li;
-                a.click();
+                (li.querySelector("a") || li).click();
                 return "clicked";
             }
         }
@@ -298,790 +280,1110 @@ async function goToPage(page, pageNum) {
     }, pageNum);
 
     if (clicked === "clicked") {
-        log(`  📄 Navigated to page ${pageNum}`, "dim");
         await wait(CONFIG.mediumWait);
+        await waitForShowingsList(page);
+        log(`  📄 Navigated to page ${pageNum}`, "dim");
         return true;
     } else if (clicked === "already") {
-        log(`  📄 Already on page ${pageNum}`, "dim");
-        return false;
-    } else {
-        log(`  ⚠️  Could not find pagination link for page ${pageNum}`, "yellow");
-        return false;
+        return true;
     }
+
+    log(`  ⚠️  Pagination link for page ${pageNum} not found`, "yellow");
+    return false;
 }
 
-/**
- * Scan the current page for showing rows that have a targeted status tag.
- * Returns an array of { index, address, tag, dateText } objects describing
- * the position and details of each matching showing on this page.
- */
-async function scanForTargetedShowings(page) {
-    const targeted = CONFIG.targetedTags;
+// ========================== CORE SCAN (text-content based) ==========================
 
-    const results = await page.evaluate((targetedTags) => {
+/**
+ * Scans the CURRENT page for targeted showings using TEXT-CONTENT matching
+ * on badge elements (not fragile CSS class selectors).
+ *
+ * Returns an array of:
+ *   { address, tag, dateText, detailUrl }
+ *
+ * detailUrl is extracted from href/ui-sref of the row container, or null if
+ * it can only be obtained by clicking the row.
+ */
+async function scanCurrentPage(page) {
+    return page.evaluate((config) => {
+        const { targetedTags } = config;
         const found = [];
 
-        // Strategy 1: Look for rows that are clickable containers.
-        // BrokerBay showings page renders each showing as a clickable row/card
-        // containing the property image, address, date/time, and a status badge.
-        // The status badge uses <span> with classes like "label label-success" (Confirmed),
-        // "label label-warning" (Pending), "label label-info" (Awaiting Approval),
-        // "label label-danger" (Cancelled).
+        /**
+         * Returns true if the node's visible text contains a street-address
+         * pattern: a number followed by at least one word (e.g. "42 Iangrove").
+         * Uses innerText so CSS block-level formatting is respected.
+         */
+        function containsStreetAddress(node) {
+            const text = node.innerText || node.textContent || "";
+            return /\b\d+[a-zA-Z]?\s+[A-Za-z]{2,}/.test(text) && text.trim().length > 30;
+        }
 
-        // Find all elements that look like showing rows - they typically contain
-        // an image and some text.
-        const allRows = document.querySelectorAll(
-            '.showing-event, [ng-repeat*="showing"], .list-group-item, .card, .showing-item'
-        );
+        /**
+         * Walk UP from el looking for the row container.
+         * Requires the candidate to be interactive AND contain a street address —
+         * this avoids stopping at the small status-badge sub-container.
+         * Falls back to the first interactive ancestor if none with address found.
+         */
+        function findRowAncestor(el, maxDepth = 18) {
+            let fallback = null;
+            let node = el.parentElement;
+            let depth = 0;
+            while (node && depth < maxDepth) {
+                const tag = node.tagName.toLowerCase();
+                const isLink = tag === "a";
+                const hasNgClick = node.hasAttribute("ng-click");
+                const hasUiSref = node.hasAttribute("ui-sref");
+                const hasRole = node.getAttribute("role") === "button";
+                const hasCursor = getComputedStyle(node).cursor === "pointer";
+                const hasImg = node.querySelector("img") !== null;
+                const textLen = (node.textContent || "").trim().length;
 
-        // Fallback: if no semantic rows found, try broader selectors
-        const rowCandidates =
-            allRows.length > 0
-                ? Array.from(allRows)
-                : Array.from(
-                    document.querySelectorAll(
-                        'div[ng-click], div[ui-sref], a[ui-sref], div.row, .media, .list-group-item'
-                    )
-                );
+                const isInteractive = isLink || hasNgClick || hasUiSref || hasRole || hasCursor || hasImg;
 
-        // Also try to find rows by looking for status badge patterns
-        const badges = document.querySelectorAll(
-            'span.label, span.badge, .status-badge, .tag, [class*="label-"]'
-        );
-
-        // Build a map of badge → closest clickable ancestor
-        const badgeParentMap = new Map();
-        badges.forEach((badge) => {
-            const text = (badge.textContent || "").trim().toLowerCase();
-            if (targetedTags.includes(text)) {
-                // Walk up to find the clickable row ancestor
-                let parent = badge.parentElement;
-                let depth = 0;
-                while (parent && depth < 10) {
-                    // Check if this parent is a good "row" container
-                    const isClickable =
-                        parent.hasAttribute("ng-click") ||
-                        parent.hasAttribute("ui-sref") ||
-                        parent.tagName === "A" ||
-                        parent.getAttribute("role") === "button" ||
-                        parent.style.cursor === "pointer" ||
-                        parent.classList.contains("showing-event") ||
-                        parent.classList.contains("list-group-item") ||
-                        parent.classList.contains("card") ||
-                        parent.classList.contains("showing-item");
-
-                    // Also check if it contains an image (showing rows have property thumbnails)
-                    const hasImage = parent.querySelector("img") !== null;
-                    const hasEnoughText = (parent.textContent || "").trim().length > 30;
-
-                    if ((isClickable || hasImage) && hasEnoughText) {
-                        if (!badgeParentMap.has(parent)) {
-                            badgeParentMap.set(parent, {
-                                badgeText: text,
-                                element: parent,
-                            });
-                        }
-                        break;
+                if (isInteractive && textLen > 20) {
+                    if (containsStreetAddress(node)) {
+                        return node;
                     }
-                    parent = parent.parentElement;
-                    depth++;
+                    if (!fallback) fallback = node;
+                }
+                node = node.parentElement;
+                depth++;
+            }
+            return fallback;
+        }
+
+        /**
+         * Extract address-like text from a container element.
+         * Uses innerText (respects CSS block boundaries) so each visual line
+         * is split correctly — unlike textContent which concatenates inline spans.
+         */
+        function extractAddress(container) {
+            const raw = container.innerText || container.textContent || "";
+            const lines = raw
+                .split(/[\n\r]+/)
+                .map((l) => l.trim())
+                .filter((l) => l.length > 5 && l.length < 140);
+
+            const withDigit = lines.find(
+                (l) =>
+                    /^\d/.test(l) &&
+                    !/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(l) &&
+                    !/^\d{1,2}:\d{2}/.test(l) &&
+                    !/^\d{4}$/.test(l)
+            );
+            if (withDigit) return withDigit;
+
+            const clean = lines.find(
+                (l) =>
+                    !targetedTags.includes(l.toLowerCase()) &&
+                    !/^\d{1,2}:\d{2}/.test(l) &&
+                    l !== "•" &&
+                    !/^(buyer|broker|seller|tenant|landlord)/i.test(l)
+            );
+            return clean || lines[0] || "Unknown";
+        }
+
+        /**
+         * Extract a date/time text from a container element.
+         */
+        function extractDate(container) {
+            const raw = container.innerText || container.textContent || "";
+            const lines = raw
+                .split(/[\n\r]+/)
+                .map((l) => l.trim())
+                .filter((l) => l.length > 3);
+            return (
+                lines.find(
+                    (l) =>
+                        /\d{1,2}:\d{2}/.test(l) ||
+                        /am|pm/i.test(l) ||
+                        /jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(l) ||
+                        /mon|tue|wed|thu|fri|sat|sun/i.test(l)
+                ) || ""
+            );
+        }
+
+        /**
+         * Try to extract a BrokerBay showing detail URL from a row element.
+         * Looks for:
+         *   1. <a href="#/my_business/showing/..."> inside or on the row
+         *   2. ui-sref that references a showing state + id param
+         *   3. ng-click that contains a 24-hex showing id
+         */
+        function extractDetailUrl(row) {
+            // 1. Direct href on an <a> tag
+            const anchors = row.tagName === "A" ? [row] : Array.from(row.querySelectorAll("a"));
+            anchors.unshift(row); // also check the row itself
+            for (const a of anchors) {
+                const href = a.getAttribute("href") || a.getAttribute("ng-href") || "";
+                if (/my_business\/showing\/[a-f0-9]{24}/i.test(href)) {
+                    // Normalise: make it a full hash URL
+                    const idMatch = href.match(/\/showing\/([a-f0-9]{24})/i);
+                    if (idMatch) {
+                        return `https://edge.brokerbay.com/#/my_business/showing/${idMatch[1]}?redirectTo=calendar`;
+                    }
                 }
             }
-        });
 
-        // Merge: use badge-based detection (most reliable since it keyed on the status tag)
-        let index = 0;
-        badgeParentMap.forEach(({ badgeText, element }) => {
-            const allText = (element.textContent || "").trim();
-            // Try to extract address-like text (the first meaningful text line)
-            const textLines = allText
-                .split("\n")
-                .map((l) => l.trim())
-                .filter((l) => l.length > 5 && l.length < 200);
-            const addressCandidate = textLines.find(
-                (l) =>
-                    /\d/.test(l) &&
-                    !targetedTags.includes(l.toLowerCase()) &&
-                    !l.toLowerCase().includes("buyer") &&
-                    !l.toLowerCase().includes("broker") &&
-                    l.length > 8
-            ) || textLines[0] || "Unknown address";
+            // 2. ui-sref attribute
+            const allUiSref = [row, ...row.querySelectorAll("[ui-sref]")];
+            for (const el of allUiSref) {
+                const sref = el.getAttribute("ui-sref") || "";
+                const idMatch = sref.match(/['""]([a-f0-9]{24})['"'"]/i);
+                if (idMatch) {
+                    return `https://edge.brokerbay.com/#/my_business/showing/${idMatch[1]}?redirectTo=calendar`;
+                }
+            }
 
-            // Extract date text
-            const dateCandidate = textLines.find(
-                (l) =>
-                    /\d{1,2}:\d{2}/.test(l) ||
-                    /am|pm/i.test(l) ||
-                    /jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(l)
-            ) || "";
+            // 3. ng-click containing a MongoDB ObjectId
+            const allNgClick = [row, ...row.querySelectorAll("[ng-click]")];
+            for (const el of allNgClick) {
+                const nc = el.getAttribute("ng-click") || "";
+                const idMatch = nc.match(/['"]([a-f0-9]{24})['"]/i);
+                if (idMatch) {
+                    return `https://edge.brokerbay.com/#/my_business/showing/${idMatch[1]}?redirectTo=calendar`;
+                }
+            }
+
+            return null;
+        }
+
+        // ---- MAIN SCAN ----
+        // Find all elements whose trimmed text EXACTLY matches one of the targeted tags.
+        // We cast a wide net: any element whose text content is a status badge text.
+        const allElements = Array.from(document.querySelectorAll("*"));
+        const seenRows = new Set();
+
+        for (const el of allElements) {
+            // Only look at "leaf-like" elements (few children) to avoid matching containers
+            if (el.children.length > 4) continue;
+
+            const text = (el.textContent || "").trim().toLowerCase();
+            if (!targetedTags.includes(text)) continue;
+
+            // Check it's visible
+            const rect = el.getBoundingClientRect();
+            const isVisible =
+                rect.width > 0 &&
+                rect.height > 0 &&
+                el.offsetParent !== null;
+            if (!isVisible) continue;
+
+            // Walk up to the row container
+            const row = findRowAncestor(el);
+            if (!row) continue;
+
+            // Deduplicate: skip if we've already processed this row container
+            if (seenRows.has(row)) continue;
+            seenRows.add(row);
+
+            const address = extractAddress(row);
+            const dateText = extractDate(row);
+            const detailUrl = extractDetailUrl(row);
 
             found.push({
-                index: index++,
-                address: addressCandidate.substring(0, 100),
-                tag: badgeText,
-                dateText: dateCandidate.substring(0, 80),
-            });
-        });
-
-        // If badge-based detection found nothing, try scanning rows directly
-        if (found.length === 0) {
-            rowCandidates.forEach((row, i) => {
-                const text = (row.textContent || "").toLowerCase();
-                for (const tag of targetedTags) {
-                    if (text.includes(tag)) {
-                        const allText = (row.textContent || "").trim();
-                        const textLines = allText
-                            .split("\n")
-                            .map((l) => l.trim())
-                            .filter((l) => l.length > 5);
-                        found.push({
-                            index: i,
-                            address: (textLines[0] || "Unknown").substring(0, 100),
-                            tag: tag,
-                            dateText: "",
-                        });
-                        break; // Only count each row once
-                    }
-                }
+                address: address.substring(0, 100),
+                tag: text,
+                dateText: dateText.substring(0, 80),
+                detailUrl,
             });
         }
 
         return found;
-    }, targeted);
-
-    return results;
+    }, { targetedTags: CONFIG.targetedTags });
 }
 
-/**
- * Click the nth targeted showing on the current page to open its detail view.
- * We re-scan the page and click the element at the given position.
- */
-async function clickShowingByIndex(page, showingInfo) {
-    const targeted = CONFIG.targetedTags;
-
-    const clicked = await page.evaluate(
-        ({ targetedTags, targetIndex }) => {
-            // Re-find badges with targeted tags
-            const badges = document.querySelectorAll(
-                'span.label, span.badge, .status-badge, .tag, [class*="label-"]'
-            );
-
-            const matchingRows = [];
-            const seen = new Set();
-
-            badges.forEach((badge) => {
-                const text = (badge.textContent || "").trim().toLowerCase();
-                if (!targetedTags.includes(text)) return;
-
-                let parent = badge.parentElement;
-                let depth = 0;
-                while (parent && depth < 10) {
-                    const isClickable =
-                        parent.hasAttribute("ng-click") ||
-                        parent.hasAttribute("ui-sref") ||
-                        parent.tagName === "A" ||
-                        parent.getAttribute("role") === "button" ||
-                        parent.style.cursor === "pointer" ||
-                        parent.classList.contains("showing-event") ||
-                        parent.classList.contains("list-group-item") ||
-                        parent.classList.contains("card") ||
-                        parent.classList.contains("showing-item");
-
-                    const hasImage = parent.querySelector("img") !== null;
-                    const hasEnoughText = (parent.textContent || "").trim().length > 30;
-
-                    if ((isClickable || hasImage) && hasEnoughText) {
-                        // Avoid duplicates using DOM identity
-                        if (!seen.has(parent)) {
-                            seen.add(parent);
-                            matchingRows.push(parent);
-                        }
-                        break;
-                    }
-                    parent = parent.parentElement;
-                    depth++;
-                }
-            });
-
-            if (targetIndex >= matchingRows.length) return false;
-
-            const target = matchingRows[targetIndex];
-            // Try clicking: prefer <a> links inside, then the row itself
-            const link =
-                target.querySelector('a[href*="showing"], a[ui-sref*="showing"], a[href]') || target;
-            link.click();
-            return true;
-        },
-        { targetedTags: targeted, targetIndex: showingInfo.index }
-    );
-
-    return clicked;
-}
+// ========================== FULL PAGINATED SCAN ==========================
 
 /**
- * On the showing detail page, perform the cancellation flow:
- *  1. Click "Cancel" button
- *  2. Select "Client is no longer interested" from the dropdown
- *  3. Click "Cancel Showing" confirmation button
- *  4. Wait for "Showing Cancelled" confirmation
+ * Scans ALL pagination pages and returns every targeted showing.
+ * Optionally filters by address substring.
+ *
+ * @param {import('puppeteer').Page} page
+ * @param {string|null} addressFilter  - lowercase partial address to match
+ * @returns {Promise<Array<{address, tag, dateText, detailUrl, pageNum}>>}
  */
-async function performCancellation(page, showingInfo) {
-    logStep("3", `Cancelling: ${showingInfo.address} [${showingInfo.tag}]`, "cancel");
+async function scanAllPages(page, addressFilter = null) {
+    const allShowings = [];
 
-    // Wait for the detail page to load
-    await wait(CONFIG.mediumWait);
+    const totalPages = await getTotalPages(page);
+    log(`  📄 Pagination: ${totalPages} page(s) detected`, "dim");
 
-    // --- Step 3a: Click the "Cancel" button ---
-    log("  🔍 Looking for Cancel button...", "dim");
-
-    let cancelBtn = await findElementByText(
-        page,
-        ["button", "a", "span", '[role="button"]', ".btn"],
-        "Cancel"
-    );
-
-    if (!cancelBtn) {
-        // Broader search: button that starts with "Cancel" but is NOT "Cancel Showing"
-        cancelBtn = await page.evaluateHandle(() => {
-            const buttons = document.querySelectorAll('button, a, [role="button"], .btn');
-            for (const btn of buttons) {
-                const text = (btn.textContent || "").trim();
-                if (/^✕?\s*Cancel$/i.test(text) || text === "× Cancel" || text === "Cancel") {
-                    if (btn.offsetParent !== null) return btn;
-                }
+    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+        if (pageNum > 1) {
+            const navigated = await goToPage(page, pageNum);
+            if (!navigated) {
+                log(`  ⚠️  Could not navigate to page ${pageNum}, skipping`, "yellow");
+                continue;
             }
-            return null;
-        });
-        cancelBtn = cancelBtn?.asElement ? cancelBtn.asElement() : null;
+        }
+
+        log(`  🔍 Scanning page ${pageNum}/${totalPages}...`, "dim");
+        const showings = await scanCurrentPage(page);
+
+        log(`     Found ${showings.length} targeted showing(s) on page ${pageNum}`, "dim");
+
+        for (const s of showings) {
+            if (addressFilter && !s.address.toLowerCase().includes(addressFilter)) continue;
+            allShowings.push({ ...s, pageNum });
+        }
     }
 
+    return allShowings;
+}
+
+// ========================== SHOWING DETAIL NAVIGATION ==========================
+
+/**
+ * Navigate to a showing's detail page.
+ * If we have a direct URL, navigate to it.
+ * If not, click the row on the list page (finding it by address text).
+ *
+ * Returns the URL we ended up on, or null on failure.
+ */
+async function navigateToShowingDetail(page, showing) {
+    if (showing.detailUrl) {
+        log(`  🔗 Navigating directly to: ${showing.detailUrl}`, "dim");
+        await page.goto(showing.detailUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: CONFIG.navigationTimeout,
+        });
+        await wait(CONFIG.mediumWait);
+        return page.url();
+    }
+
+    // Fallback: we have to navigate to the list, find the row by address text, click it
+    log(`  ⚠️  No direct URL — clicking row by address text: "${showing.address}"`, "yellow");
+
+    await navigateToShowings(page);
+    if (showing.pageNum > 1) {
+        await goToPage(page, showing.pageNum);
+        await wait(CONFIG.mediumWait);
+    }
+
+    const urlBefore = page.url();
+
+    // Find the row that contains our address text AND the targeted tag
+    const clicked = await page.evaluate(
+        ({ address, tag }) => {
+            const allElements = Array.from(document.querySelectorAll("*"));
+            for (const el of allElements) {
+                if (el.children.length > 4) continue;
+                const text = (el.textContent || "").trim().toLowerCase();
+                if (text !== tag) continue;
+
+                // Walk up to row ancestor
+                let row = el.parentElement;
+                let depth = 0;
+                while (row && depth < 12) {
+                    const rowText = (row.textContent || "").toLowerCase();
+                    if (rowText.includes(address.toLowerCase())) {
+                        row.scrollIntoView({ block: "center" });
+                        row.click();
+                        return true;
+                    }
+                    row = row.parentElement;
+                    depth++;
+                }
+            }
+            return false;
+        },
+        { address: showing.address.toLowerCase(), tag: showing.tag }
+    );
+
+    if (!clicked) {
+        log(`  ❌ Could not find showing row for: ${showing.address}`, "red");
+        return null;
+    }
+
+    // Wait for the URL to change (Angular SPA navigation)
+    try {
+        await page.waitForFunction(
+            (before) => window.location.href !== before,
+            { timeout: 10000 },
+            urlBefore
+        );
+    } catch {
+        // May have already navigated — just continue
+    }
+
+    await wait(CONFIG.mediumWait);
+    return page.url();
+}
+
+// ========================== CANCELLATION FLOW ==========================
+
+/**
+ * On the showing detail page, perform the full cancellation:
+ *  1. Click "Cancel" (the ✕ Cancel button)
+ *  2. Wait for the confirmation modal
+ *  3. Select "Client is no longer interested" from the reason dropdown
+ *  4. Click "Cancel Showing"
+ *  5. Verify success
+ */
+async function performCancellation(page, showing) {
+    log(`\n  🚫 Cancelling: "${showing.address}" [${showing.tag}]`, "magenta");
+
+    await wait(CONFIG.mediumWait);
+
+    // Ensure we're on a detail page that has a Cancel button
+    const onDetailPage = await page.evaluate(() => {
+        const url = window.location.href;
+        const body = document.body.innerText || "";
+        return (
+            url.includes("/showing/") ||
+            (body.includes("Cancel") && (body.includes("Reschedule") || body.includes("confirmed") || body.includes("approval")))
+        );
+    });
+
+    if (!onDetailPage) {
+        log(`  ❌ Not on a showing detail page (URL: ${page.url()})`, "red");
+        await takeScreenshot(page, "cancel_err_wrong_page");
+        return false;
+    }
+
+    await takeScreenshot(page, `cancel_01_detail`);
+
+    // ---- Step 1: Click the "Cancel" button (not "Cancel Showing") ----
+    log("  🔍 Looking for Cancel button...", "dim");
+
+    const cancelBtnHandle = await page.evaluateHandle(() => {
+        const candidates = Array.from(
+            document.querySelectorAll('button, a, [role="button"], .btn, span')
+        );
+        // Match exactly "Cancel" or "✕ Cancel" — NOT "Cancel Showing"
+        for (const el of candidates) {
+            if (el.offsetParent === null) continue;
+            const t = (el.textContent || "").trim();
+            if (/^(✕\s*)?cancel$/i.test(t) && !/showing/i.test(t)) return el;
+        }
+        // Fallback: icon-button with "×" near a "Cancel" label sibling
+        for (const el of candidates) {
+            if (el.offsetParent === null) continue;
+            const t = (el.textContent || "").trim();
+            if (t === "×" || t === "✕") return el;
+        }
+        return null;
+    });
+
+    const cancelBtn = cancelBtnHandle.asElement ? cancelBtnHandle.asElement() : null;
     if (!cancelBtn) {
-        log("  ❌ Cancel button not found on detail page", "red");
-        await takeScreenshot(page, "cancel_error_no_cancel_btn");
+        log("  ❌ Cancel button not found", "red");
+        await takeScreenshot(page, "cancel_err_no_cancel_btn");
         return false;
     }
 
     await clickSafely(page, cancelBtn, "Cancel button");
     await wait(CONFIG.mediumWait);
 
-    // --- Step 3b: Wait for the cancellation dialog ---
-    log("  🔍 Waiting for cancellation dialog...", "dim");
+    // ---- Step 2: Wait for the confirmation modal ----
+    log("  🔍 Waiting for confirmation modal...", "dim");
+    let modalAppeared = false;
 
-    // The dialog asks "Are you sure you want to cancel this showing?"
-    // with a "Reason for cancelling" dropdown
-    let dialogAppeared = false;
-
-    for (let attempt = 0; attempt < 3; attempt++) {
-        const hasDialog = await page.evaluate(() => {
-            const bodyText = document.body.innerText || "";
+    for (let i = 0; i < 5; i++) {
+        const visible = await page.evaluate(() => {
+            const body = document.body.innerText || "";
             return (
-                bodyText.includes("cancel this showing") ||
-                bodyText.includes("Reason for cancelling") ||
-                bodyText.includes("Select a reason") ||
-                document.querySelector('select, [class*="modal"], .modal, [role="dialog"]') !== null
+                body.includes("cancel this showing") ||
+                body.includes("Reason for cancelling") ||
+                body.includes("Select a reason") ||
+                document.querySelector('[class*="modal"], [role="dialog"], .ant-modal, .modal') !== null
             );
         });
-        if (hasDialog) {
-            dialogAppeared = true;
-            break;
-        }
+        if (visible) { modalAppeared = true; break; }
         await wait(CONFIG.shortWait);
     }
 
-    if (!dialogAppeared) {
-        log("  ❌ Cancellation dialog did not appear", "red");
-        await takeScreenshot(page, "cancel_error_no_dialog");
+    if (!modalAppeared) {
+        log("  ❌ Confirmation modal did not appear", "red");
+        await takeScreenshot(page, "cancel_err_no_modal");
         return false;
     }
 
-    log("  ✓ Cancellation dialog appeared", "dim");
-    await takeScreenshot(page, "cancel_03_dialog");
+    log("  ✓ Modal appeared", "dim");
+    await takeScreenshot(page, "cancel_02_modal_open");
 
-    // --- Step 3c: Select reason from dropdown ---
+    // ---- Step 3: Select cancellation reason ----
     log(`  🔍 Selecting reason: "${CONFIG.cancelReason}"`, "dim");
-
-    // Try <select> element first
     let reasonSelected = false;
 
-    // Method 1: Native <select> element
-    const selectResult = await page.evaluate((reason) => {
-        const selects = document.querySelectorAll("select");
-        for (const select of selects) {
-            if (select.offsetParent === null) continue;
-            const options = Array.from(select.options);
-            for (let i = 0; i < options.length; i++) {
-                const optText = options[i].textContent.trim().toLowerCase();
-                if (optText.includes(reason.toLowerCase())) {
-                    select.value = options[i].value;
-                    select.dispatchEvent(new Event("change", { bubbles: true }));
-                    // Also trigger Angular's change detection
-                    const inputEvent = new Event("input", { bubbles: true });
-                    select.dispatchEvent(inputEvent);
-                    return { success: true, method: "native-select", optionText: options[i].textContent.trim() };
-                }
-            }
-        }
-        return { success: false };
-    }, CONFIG.cancelReason);
-
-    if (selectResult.success) {
-        reasonSelected = true;
-        log(`  ✓ Selected reason via ${selectResult.method}: "${selectResult.optionText}"`, "dim");
-    }
-
-    // Method 2: Custom dropdown (click to open, then click option)
-    if (!reasonSelected) {
-        log("  ⚠️  Native select not found, trying custom dropdown...", "yellow");
-
-        // Click any dropdown toggle / select-like element
-        const dropdownToggle = await findElementByText(
-            page,
-            ['select', '[class*="select"]', '[class*="dropdown"]', 'button', '[role="listbox"]', '[role="combobox"]'],
-            "Select a reason"
+    // ── Diagnostic: dump the modal's dropdown structure for debugging ──
+    const modalDiagnostic = await page.evaluate(() => {
+        const modal = document.querySelector(
+            '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
         );
+        if (!modal) return { found: false };
 
-        if (dropdownToggle) {
-            await clickSafely(page, dropdownToggle, "dropdown toggle");
-            await wait(CONFIG.shortWait);
+        const selects = Array.from(modal.querySelectorAll("select"));
+        const ngModelEls = Array.from(modal.querySelectorAll("[ng-model]"));
+        const uiSelects = modal.querySelectorAll("ui-select, .ui-select-container, [ui-select]");
 
-            // Now find and click the option
-            const optionEl = await findElementByText(
-                page,
-                ["li", "option", "div", "span", "a", '[role="option"]', ".dropdown-item"],
-                CONFIG.cancelReason
+        return {
+            found: true,
+            selectCount: selects.length,
+            selectDetails: selects.map(sel => ({
+                id: sel.id,
+                name: sel.name,
+                ngModel: sel.getAttribute("ng-model"),
+                className: sel.className,
+                optionCount: sel.options.length,
+                options: Array.from(sel.options).map(o => ({
+                    value: o.value, text: o.textContent.trim(), selected: o.selected
+                })),
+                visible: sel.offsetParent !== null
+            })),
+            ngModels: ngModelEls.map(el => ({
+                tag: el.tagName.toLowerCase(),
+                ngModel: el.getAttribute("ng-model"),
+                className: (el.className || "").substring(0, 60)
+            })),
+            uiSelectCount: uiSelects.length,
+        };
+    });
+
+    log(`  📋 [DIAG] Modal: ${modalDiagnostic.selectCount || 0} <select>, ` +
+        `${modalDiagnostic.ngModels?.length || 0} [ng-model], ` +
+        `${modalDiagnostic.uiSelectCount || 0} ui-select`, "dim");
+    if (modalDiagnostic.selectDetails?.length > 0) {
+        for (const s of modalDiagnostic.selectDetails) {
+            log(`    [DIAG] <select> ng-model="${s.ngModel}" id="${s.id}" ` +
+                `options=${s.optionCount} visible=${s.visible}`, "dim");
+            s.options.forEach(o =>
+                log(`      option: value="${o.value}" text="${o.text}" selected=${o.selected}`, "dim")
             );
-
-            if (optionEl) {
-                await clickSafely(page, optionEl, `reason option: "${CONFIG.cancelReason}"`);
-                reasonSelected = true;
-                await wait(CONFIG.shortWait);
-            }
         }
     }
 
-    // Method 3: Try typing into an input field and selecting
+    // ── Method A: Puppeteer page.select() — fires REAL CDP browser events ──
     if (!reasonSelected) {
-        log("  ⚠️  Custom dropdown didn't work, trying input-based approach...", "yellow");
-        const reasonClicked = await page.evaluate((reason) => {
-            // Look for any clickable element containing the reason text
-            const allEls = document.querySelectorAll("li, div, span, option, a, button");
-            for (const el of allEls) {
-                const text = (el.textContent || "").trim();
-                if (text.toLowerCase().includes(reason.toLowerCase()) && el.offsetParent !== null) {
-                    el.click();
-                    return true;
+        log("  🔍 Method A: page.select() for native <select>...", "dim");
+
+        const selectInfo = await page.evaluate((reason) => {
+            const modal = document.querySelector(
+                '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
+            );
+            const root = modal || document.body;
+            const selects = Array.from(root.querySelectorAll("select"));
+
+            for (const sel of selects) {
+                if (sel.offsetParent === null) continue;
+
+                // Build a unique CSS selector
+                let cssSelector = null;
+                if (sel.getAttribute("ng-model")) {
+                    cssSelector = `select[ng-model="${sel.getAttribute("ng-model")}"]`;
+                } else if (sel.id) {
+                    cssSelector = `select#${sel.id}`;
+                } else if (sel.name) {
+                    cssSelector = `select[name="${sel.name}"]`;
+                } else {
+                    cssSelector = "select";
+                }
+
+                // Find matching option by text
+                for (const opt of sel.options) {
+                    if (opt.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
+                        return {
+                            found: true,
+                            cssSelector,
+                            optionValue: opt.value,
+                            optionText: opt.textContent.trim(),
+                        };
+                    }
                 }
             }
-            return false;
+            return { found: false };
         }, CONFIG.cancelReason);
 
-        if (reasonClicked) {
+        if (selectInfo.found && selectInfo.cssSelector) {
+            log(`  ✓ Found <select> at "${selectInfo.cssSelector}" ` +
+                `with option "${selectInfo.optionText}"`, "dim");
+            try {
+                // page.select() uses CDP — fires REAL browser events
+                await page.select(selectInfo.cssSelector, selectInfo.optionValue);
+                log("  ✓ page.select() executed", "dim");
+
+                // Insurance: trigger AngularJS $digest cycle
+                await page.evaluate((sel) => {
+                    const el = document.querySelector(sel);
+                    if (el && window.angular) {
+                        try {
+                            const scope = window.angular.element(el).scope() ||
+                                window.angular.element(el).isolateScope();
+                            if (scope && !scope.$$phase && !scope.$root?.$$phase) {
+                                scope.$digest();
+                            }
+                        } catch { }
+                    }
+                }, selectInfo.cssSelector);
+
+                await wait(500);
+
+                // Verify: read back selected value
+                const verified = await page.evaluate((sel, expected) => {
+                    const element = document.querySelector(sel);
+                    if (!element) return false;
+                    return element.value === expected;
+                }, selectInfo.cssSelector, selectInfo.optionValue);
+
+                if (verified) {
+                    reasonSelected = true;
+                    log(`  ✅ Method A: VERIFIED — "${selectInfo.optionText}" selected`, "green");
+                } else {
+                    log("  ⚠️  page.select() value did not stick", "yellow");
+                }
+            } catch (err) {
+                log(`  ⚠️  page.select() error: ${err.message}`, "yellow");
+            }
+        } else {
+            log("  ⚠️  No native <select> with matching option found", "yellow");
+        }
+    }
+
+    // ── Method B: Real mouse interaction for custom dropdowns ──
+    if (!reasonSelected) {
+        log("  🔍 Method B: real mouse clicks for custom dropdown...", "dim");
+
+        // B1: Find dropdown trigger via known selectors
+        const triggerSelectors = [
+            ".ui-select-toggle",
+            ".ui-select-container .ui-select-match",
+            "[ui-select] .btn",
+            '[role="combobox"]',
+            '[role="listbox"]',
+            '[class*="select-toggle"]',
+            '[class*="select-match"]',
+        ];
+
+        let triggerClicked = false;
+
+        for (const sel of triggerSelectors) {
+            if (triggerClicked) break;
+            try {
+                const els = await page.$$(sel);
+                for (const el of els) {
+                    const visible = await el.evaluate(n => n.offsetParent !== null);
+                    if (!visible) continue;
+                    const box = await el.boundingBox();
+                    if (box) {
+                        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+                        log(`  ✓ Clicked dropdown trigger via "${sel}"`, "dim");
+                        triggerClicked = true;
+                        break;
+                    }
+                }
+            } catch { }
+        }
+
+        // B1b: Fallback — find dropdown by proximity to "Reason for cancelling" label
+        if (!triggerClicked) {
+            const triggerBox = await page.evaluate(() => {
+                const modal = document.querySelector(
+                    '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
+                );
+                if (!modal) return null;
+
+                // Find the "Reason for cancelling" label
+                const allEls = Array.from(modal.querySelectorAll("*"));
+                let labelEl = null;
+                for (const el of allEls) {
+                    if (el.children.length > 3) continue;
+                    const t = (el.textContent || "").trim().toLowerCase();
+                    if (t.includes("reason for cancelling") || t === "reason for cancelling") {
+                        labelEl = el;
+                        break;
+                    }
+                }
+                if (!labelEl) return null;
+
+                const labelRect = labelEl.getBoundingClientRect();
+                const candidates = Array.from(modal.querySelectorAll(
+                    'select, [class*="select"], [role="combobox"], [role="listbox"], ' +
+                    'button, [class*="dropdown"], .form-control, input'
+                ));
+
+                let closest = null;
+                let closestDist = Infinity;
+                for (const c of candidates) {
+                    if (c.offsetParent === null) continue;
+                    const r = c.getBoundingClientRect();
+                    if (r.top < labelRect.top - 10) continue;
+                    const dist = Math.abs(r.top - labelRect.bottom) + Math.abs(r.left - labelRect.left);
+                    if (dist < closestDist) { closestDist = dist; closest = c; }
+                }
+
+                if (closest) {
+                    const r = closest.getBoundingClientRect();
+                    return { x: r.x + r.width / 2, y: r.y + r.height / 2, tag: closest.tagName };
+                }
+                return null;
+            });
+
+            if (triggerBox) {
+                await page.mouse.click(triggerBox.x, triggerBox.y);
+                log(`  ✓ Clicked dropdown trigger near label (<${triggerBox.tag}>)`, "dim");
+                triggerClicked = true;
+            }
+        }
+
+        if (triggerClicked) {
+            await wait(800);
+
+            // B2: Find and click the matching option
+            const optionBox = await page.evaluate((reason) => {
+                const optionSels = [
+                    ".ui-select-choices-row", ".ui-select-choices-row-inner",
+                    ".ui-select-choices li", '[role="option"]',
+                    ".dropdown-menu li", ".dropdown-item",
+                    "li", "div[class*='option']", "span[class*='option']",
+                ];
+                for (const sel of optionSels) {
+                    const opts = Array.from(document.querySelectorAll(sel));
+                    for (const opt of opts) {
+                        if (opt.offsetParent === null) continue;
+                        const t = (opt.textContent || "").trim();
+                        if (t.toLowerCase().includes(reason.toLowerCase())) {
+                            const r = opt.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) {
+                                return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: t };
+                            }
+                        }
+                    }
+                }
+                return null;
+            }, CONFIG.cancelReason);
+
+            if (optionBox) {
+                await page.mouse.click(optionBox.x, optionBox.y);
+                log(`  ✓ Clicked option "${optionBox.text}" via real mouse`, "dim");
+                await wait(500);
+                reasonSelected = true;
+            } else {
+                log("  ⚠️  Dropdown opened but no matching option found", "yellow");
+                await page.keyboard.press("Escape");
+                await wait(300);
+            }
+        } else {
+            log("  ⚠️  No custom dropdown trigger found", "yellow");
+        }
+    }
+
+    // ── Method C: AngularJS scope injection with verified model readback ──
+    if (!reasonSelected) {
+        log("  🔍 Method C: Angular scope injection with verification...", "dim");
+
+        const scopeResult = await page.evaluate((reason) => {
+            if (!window.angular) return { ok: false, info: "no_angular" };
+
+            const modal = document.querySelector(
+                '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
+            );
+            const root = modal || document.body;
+            const ngModelEls = Array.from(root.querySelectorAll("[ng-model]"));
+
+            for (const el of ngModelEls) {
+                if (el.offsetParent === null) continue;
+                const ngModel = el.getAttribute("ng-model");
+                if (!ngModel) continue;
+
+                try {
+                    const scope = window.angular.element(el).scope() ||
+                        window.angular.element(el).isolateScope();
+                    if (!scope) continue;
+
+                    // For <select>, use the option value; for text fields, use the reason string
+                    let valueToSet = reason;
+                    if (el.tagName === "SELECT") {
+                        for (const opt of el.options) {
+                            if (opt.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
+                                valueToSet = opt.value;
+                                break;
+                            }
+                        }
+                    }
+
+                    const parts = ngModel.split(".");
+                    scope.$apply(() => {
+                        let obj = scope;
+                        for (let i = 0; i < parts.length - 1; i++) {
+                            if (!obj[parts[i]]) obj[parts[i]] = {};
+                            obj = obj[parts[i]];
+                        }
+                        obj[parts[parts.length - 1]] = valueToSet;
+                    });
+
+                    // Verify: read back the model value
+                    let readBack = scope;
+                    for (const part of parts) readBack = readBack?.[part];
+
+                    if (readBack === valueToSet) {
+                        return { ok: true, ngModel, valueSet: valueToSet };
+                    }
+                } catch { }
+            }
+            return { ok: false, info: "no_model_accepted" };
+        }, CONFIG.cancelReason);
+
+        if (scopeResult.ok) {
             reasonSelected = true;
-            log(`  ✓ Selected reason by clicking matching text element`, "dim");
+            log(`  ✓ Scope injection: ng-model="${scopeResult.ngModel}" value="${scopeResult.valueSet}"`, "dim");
             await wait(CONFIG.shortWait);
+        } else {
+            log(`  ⚠️  Scope injection failed: ${scopeResult.info}`, "yellow");
+        }
+    }
+
+    // ── Method D: Keyboard navigation ──
+    if (!reasonSelected) {
+        log("  🔍 Method D: keyboard focus + ArrowDown navigation...", "dim");
+
+        const dropdownFocused = await page.evaluate(() => {
+            const modal = document.querySelector(
+                '[role="dialog"], [class*="modal-content"], [class*="modal-body"], .modal'
+            );
+            if (!modal) return false;
+            const focusable = modal.querySelector(
+                'select, [role="combobox"], [role="listbox"], [tabindex], ' +
+                '.ui-select-toggle, [class*="select"]'
+            );
+            if (focusable && focusable.offsetParent !== null) {
+                focusable.focus();
+                return true;
+            }
+            return false;
+        });
+
+        if (dropdownFocused) {
+            await page.keyboard.press("Space");
+            await wait(300);
+
+            for (let i = 0; i < 15; i++) {
+                await page.keyboard.press("ArrowDown");
+                await wait(150);
+
+                const currentOption = await page.evaluate((reason) => {
+                    const sel = document.activeElement;
+                    if (sel?.tagName === "SELECT") {
+                        const cur = sel.options[sel.selectedIndex];
+                        if (cur?.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
+                            return cur.textContent.trim();
+                        }
+                    }
+                    const active = document.querySelector(
+                        '[aria-selected="true"], .active, .ui-select-choices-row.active, .selected'
+                    );
+                    if (active?.textContent.trim().toLowerCase().includes(reason.toLowerCase())) {
+                        return active.textContent.trim();
+                    }
+                    return null;
+                }, CONFIG.cancelReason);
+
+                if (currentOption) {
+                    await page.keyboard.press("Enter");
+                    log(`  ✓ Selected "${currentOption}" via keyboard`, "dim");
+                    await wait(500);
+                    reasonSelected = true;
+                    break;
+                }
+            }
+
+            if (!reasonSelected) {
+                log("  ⚠️  Keyboard navigation did not find option", "yellow");
+                await page.keyboard.press("Escape");
+                await wait(300);
+            }
+        }
+    }
+
+    // ── VERIFICATION GATE: Check if "Cancel Showing" button became enabled ──
+    if (reasonSelected) {
+        log("  🔍 Verifying: checking if Cancel Showing button is enabled...", "dim");
+        await wait(800);
+
+        const buttonEnabled = await page.evaluate(() => {
+            const candidates = Array.from(document.querySelectorAll(
+                'button, a, [role="button"], input[type="submit"]'
+            ));
+            for (const el of candidates) {
+                if (el.offsetParent === null) continue;
+                const t = (el.textContent || el.value || "").trim().toLowerCase();
+                if (!t.includes("cancel showing")) continue;
+                return !el.disabled && !el.classList.contains("disabled") &&
+                    !el.getAttribute("disabled") && el.getAttribute("aria-disabled") !== "true";
+            }
+            return false;
+        });
+
+        if (buttonEnabled) {
+            log("  ✅ VERIFIED: Cancel Showing button is enabled — reason accepted", "green");
+        } else {
+            log("  ⚠️  VERIFICATION FAILED: Cancel Showing button still disabled", "yellow");
+            reasonSelected = false;
+            await takeScreenshot(page, "cancel_03_verification_failed");
         }
     }
 
     if (!reasonSelected) {
-        log("  ❌ Could not select cancellation reason from dropdown", "red");
-        await takeScreenshot(page, "cancel_error_no_reason");
+        log("  ❌ Could not select cancellation reason (all methods failed verification)", "red");
+        await takeScreenshot(page, "cancel_err_no_reason");
+        await dismissModalIfOpen(page);
         return false;
     }
 
-    await takeScreenshot(page, "cancel_04_reason_selected");
+    await takeScreenshot(page, "cancel_03_reason_selected");
 
-    // --- Step 3d: Click "Cancel Showing" confirmation button ---
-    log('  🔍 Clicking "Cancel Showing" confirmation button...', "dim");
+    // ---- Step 4: Wait for "Cancel Showing" button to become enabled, then click ----
+    log('  🔍 Waiting for "Cancel Showing" button to become enabled...', "dim");
 
-    await wait(CONFIG.shortWait);
-
-    let confirmBtn = await findElementByText(
-        page,
-        ["button", "a", '[role="button"]', ".btn"],
-        "Cancel Showing"
-    );
-
-    if (!confirmBtn) {
-        // Fallback: find by more specific evaluation
-        confirmBtn = await page.evaluateHandle(() => {
-            const buttons = document.querySelectorAll('button, a, [role="button"], .btn, input[type="submit"]');
-            for (const btn of buttons) {
-                const text = (btn.textContent || btn.value || "").trim().toLowerCase();
-                if (text === "cancel showing" && btn.offsetParent !== null) return btn;
-            }
-            // Try partial match
-            for (const btn of buttons) {
-                const text = (btn.textContent || btn.value || "").trim().toLowerCase();
-                if (text.includes("cancel showing") && btn.offsetParent !== null && !btn.disabled) return btn;
+    let confirmBtn = null;
+    for (let attempt = 0; attempt < 8; attempt++) {
+        const handle = await page.evaluateHandle(() => {
+            const candidates = Array.from(document.querySelectorAll(
+                'button, a, [role="button"], input[type="submit"]'
+            ));
+            for (const el of candidates) {
+                if (el.offsetParent === null) continue;
+                const t = (el.textContent || el.value || "").trim().toLowerCase();
+                if (!t.includes("cancel showing")) continue;
+                if (!el.disabled && !el.classList.contains("disabled") &&
+                    !el.getAttribute("disabled") && !el.classList.contains("ant-btn-disabled")) {
+                    return el;
+                }
             }
             return null;
         });
-        confirmBtn = confirmBtn?.asElement ? confirmBtn.asElement() : null;
+        const el = handle.asElement ? handle.asElement() : null;
+        if (el) { confirmBtn = el; break; }
+        await wait(500);
     }
 
     if (!confirmBtn) {
-        log('  ❌ "Cancel Showing" button not found or not enabled', "red");
-        await takeScreenshot(page, "cancel_error_no_confirm_btn");
+        log('  ❌ "Cancel Showing" button never became enabled — reason was not applied', "red");
+        await takeScreenshot(page, "cancel_err_btn_disabled");
+        await dismissModalIfOpen(page);
         return false;
     }
 
-    // Check if the button is disabled
-    const isDisabled = await page.evaluate((el) => el.disabled || el.classList.contains("disabled"), confirmBtn);
-    if (isDisabled) {
-        log('  ❌ "Cancel Showing" button is disabled – reason may not have been selected properly', "red");
-        await takeScreenshot(page, "cancel_error_btn_disabled");
-        return false;
-    }
-
-    await clickSafely(page, confirmBtn, '"Cancel Showing" button');
+    log('  ✓ "Cancel Showing" button is enabled', "dim");
+    await clickSafely(page, confirmBtn, '"Cancel Showing" confirm button');
     await wait(CONFIG.mediumWait);
 
-    // --- Step 3e: Verify cancellation ---
+    // ---- Step 5: Verify cancellation ----
     log("  🔍 Verifying cancellation...", "dim");
-
-    let verified = false;
-    for (let attempt = 0; attempt < 5; attempt++) {
-        const confirmation = await page.evaluate(() => {
-            const bodyText = (document.body.innerText || "").toLowerCase();
-            return (
-                bodyText.includes("showing cancelled") ||
-                bodyText.includes("has been cancelled") ||
-                bodyText.includes("successfully cancelled") ||
-                bodyText.includes("cancellation confirmed")
-            );
-        });
-        if (confirmation) {
-            verified = true;
-            break;
-        }
-
-        // Also check if the tag changed to "Cancelled"
-        const tagChanged = await page.evaluate(() => {
-            const badges = document.querySelectorAll('span.label, span.badge, .status-badge, .tag, [class*="label-"]');
-            for (const badge of badges) {
-                if ((badge.textContent || "").trim().toLowerCase() === "cancelled") return true;
+    let confirmed = false;
+    for (let i = 0; i < 6; i++) {
+        const result = await page.evaluate(() => {
+            const body = (document.body.innerText || "").toLowerCase();
+            const url = window.location.href;
+            // Text-based confirmation
+            if (
+                body.includes("showing cancelled") ||
+                body.includes("has been cancelled") ||
+                body.includes("successfully cancelled") ||
+                body.includes("cancellation confirmed")
+            ) return "text";
+            // Badge changed to Cancelled
+            const allEls = Array.from(document.querySelectorAll("*"));
+            for (const el of allEls) {
+                if (el.children.length > 2) continue;
+                if ((el.textContent || "").trim().toLowerCase() === "cancelled" && el.offsetParent !== null)
+                    return "badge";
             }
-            return false;
+            // Modal closed and we're back on detail (showing was cancelled in place)
+            if (url.includes("/showing/") && !document.querySelector('[class*="modal"], [role="dialog"]'))
+                return "modal_closed";
+            return null;
         });
-        if (tagChanged) {
-            verified = true;
+
+        if (result) {
+            confirmed = true;
+            log(`  ✅ Cancellation confirmed (signal: ${result})`, "green");
             break;
         }
-
         await wait(CONFIG.shortWait);
     }
 
-    if (verified) {
-        log("  ✅ Showing Cancelled – confirmed!", "green");
-    } else {
-        log("  ⚠️  Could not detect cancellation confirmation text, but proceeding", "yellow");
+    if (!confirmed) {
+        log("  ⚠️  Could not detect cancellation confirmation — proceeding", "yellow");
     }
 
-    await takeScreenshot(page, "cancel_05_cancelled");
+    await takeScreenshot(page, "cancel_04_done");
     return true;
 }
 
-// ========================== MAIN ORCHESTRATOR ==========================
+// ========================== EXPORTED API FOR WORKER ==========================
 
-async function main() {
-    log("\n" + "═".repeat(70), "bright");
-    log("  🚫  AUTO-CANCEL SHOWINGS SCRIPT", "bright");
-    log("═".repeat(70), "bright");
-    if (DRY_RUN) {
-        log("  ⚡ DRY RUN MODE – no showings will actually be cancelled\n", "yellow");
-    }
-    log(`  Target tags : ${CONFIG.targetedTags.join(", ")}`, "dim");
-    log(`  Cancel reason: ${CONFIG.cancelReason}`, "dim");
-    log(`  Showings URL : ${CONFIG.showingsUrl}`, "dim");
-    log("", "white");
-
-    const stats = {
-        scanned: 0,
-        cancelled: 0,
-        skipped: 0,
-        failed: 0,
-        alreadyCancelled: 0,
-        errors: [],
-    };
-
-    let browser = null;
+/**
+ * Run a cancellation sweep using a pre-existing browser instance.
+ * Called from auto-booking-worker.js after all queued bookings are done.
+ *
+ * @param {import('puppeteer').Browser} browser
+ * @param {Object} [options]
+ * @param {boolean} [options.dryRun=false]
+ * @param {string|null} [options.addressFilter=null] - lowercase partial address
+ * @returns {Promise<{cancelled: number, failed: number, scanned: number, errors: string[]}>}
+ */
+export async function runCancellationSweep(browser, options = {}) {
+    const { dryRun = false, addressFilter = null } = options;
     let page = null;
 
+    const stats = { scanned: 0, cancelled: 0, skipped: 0, failed: 0, errors: [] };
+
     try {
-        // === STEP 0: Launch/connect browser ===
-        logStep("0", "Connecting to browser", "info");
+        log(`\n${"═".repeat(70)}`, "bright");
+        log("  🚫  [CANCEL] Cancellation Sweep Starting", "bright");
+        log(`${"═".repeat(70)}`, "bright");
+        if (dryRun) log("  ⚡ DRY RUN — no actual cancellations", "yellow");
+        if (addressFilter) log(`  🎯 Address filter: "${addressFilter}"`, "cyan");
 
-        browser = await launchWithSession({
-            headless: process.env.HEADLESS !== "false",
-            defaultViewport: CONFIG.viewport,
-        });
-
-        logStep("0", "Browser connected", "success");
-
-        // === STEP 0.1: Find or create a page ===
-        // Reuse existing tab/session if connected to existing browser
-        // (same logic as auto-book-enhanced.js)
-        let reusedTab = false;
-
-        if (browser.isConnectedToExisting) {
-            logStep("0.1", "Checking for open BrokerBay tabs...", "info");
-            const allPages = await browser.pages();
-
-            // Look for a tab that is already on BrokerBay (not the login page)
-            const brokerBayPage = allPages.find((p) => {
-                const url = p.url();
-                return url.includes("brokerbay.com") && !url.includes("auth.brokerbay.com/login");
-            });
-
-            if (brokerBayPage) {
-                log(`  ✅ Found existing BrokerBay tab: ${brokerBayPage.url()}`, "green");
-                log(`  ✅ Reusing authenticated session - validation will be skipped`, "green");
-                page = brokerBayPage;
-                reusedTab = true;
-
-                // Bring it to front
-                try {
-                    await page.bringToFront();
-                    log(`  ✓ Brought tab to front`, "dim");
-                } catch (e) {
-                    log(`  ⚠️  Could not bring tab to front: ${e.message}`, "dim");
-                }
+        // Get or create a page
+        const useExistingTab = browser.isConnectedToExisting || browser._sessionReady;
+        if (useExistingTab) {
+            const pages = await browser.pages();
+            const bbPage = pages.find(
+                (p) => p.url().includes("edge.brokerbay.com") && !p.url().includes("auth.brokerbay.com")
+            );
+            if (bbPage) {
+                page = bbPage;
+                try { await page.bringToFront(); } catch { }
             } else {
-                log(`  ℹ️  No active BrokerBay tab found. Opening new tab...`, "dim");
                 page = await browser.newPage();
             }
         } else {
-            const allPages = await browser.pages();
-            page = allPages.length > 0 ? allPages[0] : await browser.newPage();
-        }
+            const pages = await browser.pages();
+            page = pages.length > 0 ? pages[0] : await browser.newPage();
 
-        await page.setViewport(CONFIG.viewport);
-
-        // === STEP 0.5: Validate session ===
-        // Skip validation if we reused an authenticated tab - it's already verified
-        if (reusedTab) {
-            logStep("0.5", "Skipping session validation - using existing authenticated tab", "success");
-            log(`  ✓ Tab already authenticated at: ${page.url()}`, "dim");
-            log(`  ✓ Proceeding directly to cancellation flow`, "dim");
-        } else {
-            logStep("0.5", "Validating BrokerBay session", "info");
-
-            // Navigate to BrokerBay if we're not there yet
+            // Session check
             if (!page.url().includes("brokerbay.com")) {
                 await page.goto("https://edge.brokerbay.com/#/my_business", {
                     waitUntil: "domcontentloaded",
                     timeout: CONFIG.navigationTimeout,
                 });
                 await wait(3000);
-            } else {
-                log(`  ✓ Already on BrokerBay page`, "dim");
             }
-
-            // Check if session is still valid (skip navigation if already on BrokerBay)
-            await validateSessionOrPrompt(page, true);
-            logStep("0.5", "Session validated - already logged in", "success");
+            const sessionOk = await isSessionValid(page);
+            if (!sessionOk) {
+                log("  ❌ [CANCEL] Session expired — re-export and re-deploy.", "red");
+                stats.errors.push("Session expired");
+                return stats;
+            }
         }
 
-        // === STEP 1: Navigate to showings ===
+        await page.setViewport(CONFIG.viewport);
+
+        // Navigate to the showings list
         await navigateToShowings(page);
 
-        // === STEP 2: Scan & Cancel Loop ===
-        logStep("2", "Scanning for showings to cancel", "info");
+        // One-pass scan of all pages
+        const targeted = await scanAllPages(page, addressFilter);
+        stats.scanned = targeted.length;
 
-        let passNumber = 0;
-        let keepGoing = true;
+        log(`\n  📋 Found ${targeted.length} targeted showing(s)`, targeted.length > 0 ? "cyan" : "dim");
+        targeted.forEach((s, i) =>
+            log(`     ${i + 1}. [${s.tag.toUpperCase()}] ${s.address}${s.detailUrl ? "" : " (no direct URL — will click row)"}`, "white")
+        );
 
-        while (keepGoing) {
-            passNumber++;
-            log(`\n${"─".repeat(50)}`, "dim");
-            log(`  🔄 Pass #${passNumber}`, "cyan");
-            log(`${"─".repeat(50)}`, "dim");
+        if (targeted.length === 0) {
+            log("  ✅ Nothing to cancel.", "green");
+            return stats;
+        }
 
-            // Always start from the showings list page
-            if (passNumber > 1) {
+        if (dryRun) {
+            stats.skipped = targeted.length;
+            log("\n  ⚡ Dry-run complete — no cancellations performed.", "yellow");
+            return stats;
+        }
+
+        // Cancel each showing individually
+        for (const showing of targeted) {
+            log(`\n${"─".repeat(60)}`, "dim");
+            log(`  🎯 [${showing.tag.toUpperCase()}] ${showing.address}`, "cyan");
+            log(`     Date: ${showing.dateText || "N/A"}  |  Page: ${showing.pageNum}`, "dim");
+
+            // Navigate to detail page
+            const detailUrl = await navigateToShowingDetail(page, showing);
+            if (!detailUrl || !detailUrl.includes("/showing/")) {
+                log(`  ❌ Failed to reach detail page for: ${showing.address}`, "red");
+                stats.failed++;
+                stats.errors.push(`Detail nav failed: ${showing.address}`);
+                // Go back to list for next iteration
                 await navigateToShowings(page);
+                continue;
             }
 
-            const paginationPages = await getPaginationPages(page);
-            let foundAnyThisPass = false;
+            const success = await performCancellation(page, showing);
 
-            for (const pageNum of paginationPages) {
-                if (pageNum > 1) {
-                    await goToPage(page, pageNum);
-                    await wait(CONFIG.mediumWait);
-                }
-
-                const showings = await scanForTargetedShowings(page);
-                stats.scanned += showings.length;
-
-                if (showings.length === 0) {
-                    log(`  📄 Page ${pageNum}: No targeted showings found`, "dim");
-                    continue;
-                }
-
-                log(`  📄 Page ${pageNum}: Found ${showings.length} targeted showing(s)`, "cyan");
-
-                for (const showing of showings) {
-                    log(
-                        `\n  ┌─ Showing: ${showing.address}`,
-                        "white"
-                    );
-                    log(`  │  Tag: ${showing.tag}  |  Date: ${showing.dateText || "N/A"}`, "dim");
-
-                    if (DRY_RUN) {
-                        log("  └─ [DRY RUN] Would cancel this showing", "yellow");
-                        stats.skipped++;
-                        continue;
-                    }
-
-                    foundAnyThisPass = true;
-
-                    // Click the showing to open detail page
-                    log("  │  Opening showing detail page...", "dim");
-
-                    // Always re-navigate to the correct page before clicking
-                    // (because after a cancellation we come back and the list may have shifted)
-                    if (pageNum > 1) {
-                        await navigateToShowings(page);
-                        await goToPage(page, pageNum);
-                        await wait(CONFIG.mediumWait);
-                    }
-
-                    // Re-scan to get fresh references (DOM may have changed)
-                    const freshShowings = await scanForTargetedShowings(page);
-                    if (freshShowings.length === 0) {
-                        log("  └─ ⚠️  No more targeted showings on this page after re-scan", "yellow");
-                        break;
-                    }
-
-                    // Click the first targeted showing (always index 0 since we process one at a time)
-                    const clickResult = await clickShowingByIndex(page, { ...freshShowings[0], index: 0 });
-                    if (!clickResult) {
-                        log("  └─ ❌ Failed to click showing row", "red");
-                        stats.failed++;
-                        stats.errors.push(`Failed to click: ${showing.address}`);
-                        continue;
-                    }
-
-                    await wait(CONFIG.mediumWait);
-
-                    // Verify we're on a detail page
-                    const onDetailPage = await page.evaluate(() => {
-                        const url = window.location.href;
-                        const bodyText = (document.body.innerText || "").toLowerCase();
-                        return (
-                            url.includes("/showing/") ||
-                            bodyText.includes("cancel") ||
-                            bodyText.includes("reschedule") ||
-                            bodyText.includes("showing request") ||
-                            bodyText.includes("your showing")
-                        );
-                    });
-
-                    if (!onDetailPage) {
-                        log("  └─ ⚠️  May not be on detail page, attempting cancellation anyway", "yellow");
-                    }
-
-                    await takeScreenshot(page, `cancel_02_detail_${stats.cancelled + 1}`);
-
-                    // Perform the cancellation
-                    const success = await performCancellation(page, showing);
-
-                    if (success) {
-                        stats.cancelled++;
-                        log(`  └─ ✅ Successfully cancelled (${stats.cancelled} total)`, "green");
-                    } else {
-                        stats.failed++;
-                        stats.errors.push(`Failed to cancel: ${showing.address}`);
-                        log(`  └─ ❌ Cancellation failed`, "red");
-                    }
-
-                    // Navigate back to the showings list for the next one
-                    // We always go back to page 1, and re-scan – because after a cancellation,
-                    // the list re-orders and pagination shifts.
-                    await wait(CONFIG.shortWait);
-                    break; // Break inner loop – restart from page 1 after each cancellation
-                }
-
-                if (foundAnyThisPass) {
-                    break; // Break pagination loop – restart full scan after a cancellation
-                }
-            }
-
-            if (DRY_RUN) {
-                keepGoing = false; // Only do one pass in dry-run mode
-            } else if (!foundAnyThisPass) {
-                keepGoing = false; // No more targeted showings found
-            }
-            // Otherwise loop continues: we cancelled something and need to re-scan
-        }
-
-        // === STEP 4: Final verification ===
-        logStep("4", "Final verification – checking all pages for remaining targeted showings", "info");
-
-        await navigateToShowings(page);
-        const finalPages = await getPaginationPages(page);
-        let remainingCount = 0;
-
-        for (const pageNum of finalPages) {
-            if (pageNum > 1) {
-                await goToPage(page, pageNum);
-                await wait(CONFIG.mediumWait);
-            }
-            const remaining = await scanForTargetedShowings(page);
-            remainingCount += remaining.length;
-            if (remaining.length > 0) {
-                log(`  ⚠️  Page ${pageNum}: ${remaining.length} targeted showing(s) still remain`, "yellow");
-                remaining.forEach((s) => {
-                    log(`     • ${s.address} [${s.tag}]`, "yellow");
-                });
+            if (success) {
+                stats.cancelled++;
+                log(`  ✅ Cancelled (${stats.cancelled} total so far)`, "green");
             } else {
-                log(`  ✓ Page ${pageNum}: Clean – no targeted showings`, "dim");
+                stats.failed++;
+                stats.errors.push(`Cancel failed: ${showing.address}`);
             }
+
+            // Small pause between cancellations to avoid rate-limiting
+            await wait(CONFIG.mediumWait);
+
+            // Return to list for next iteration
+            await navigateToShowings(page);
         }
 
-        await takeScreenshot(page, "cancel_06_final_verification");
-
-        if (remainingCount === 0) {
-            logStep("4", "Verification passed – all targeted showings have been cancelled! ✨", "success");
-        } else {
-            logStep(
-                "4",
-                `Verification: ${remainingCount} targeted showing(s) still remain`,
-                "warning"
-            );
-        }
-    } catch (error) {
-        log(`\n❌ FATAL ERROR: ${error.message}`, "red");
-        log(`   Stack: ${error.stack}`, "dim");
-        stats.errors.push(`Fatal: ${error.message}`);
-
-        if (page) {
-            await takeScreenshot(page, "cancel_error_fatal");
-        }
-    } finally {
-        // === SUMMARY ===
-        log("\n" + "═".repeat(70), "bright");
-        log("  📊  CANCELLATION SUMMARY", "bright");
-        log("═".repeat(70), "bright");
-        log(`  Showings scanned   : ${stats.scanned}`, "white");
-        log(`  Successfully cancelled: ${stats.cancelled}`, "green");
-        log(`  Failed             : ${stats.failed}`, stats.failed > 0 ? "red" : "white");
-        log(`  Skipped (dry-run)  : ${stats.skipped}`, stats.skipped > 0 ? "yellow" : "white");
-
+        // ---- Summary ----
+        log(`\n${"═".repeat(70)}`, "bright");
+        log("  📊  [CANCEL] SWEEP SUMMARY", "bright");
+        log(`${"═".repeat(70)}`, "bright");
+        log(`  Scanned  : ${stats.scanned}`, "white");
+        log(`  Cancelled: ${stats.cancelled}`, "green");
+        log(`  Failed   : ${stats.failed}`, stats.failed > 0 ? "red" : "white");
         if (stats.errors.length > 0) {
-            log("\n  Errors:", "red");
             stats.errors.forEach((e, i) => log(`    ${i + 1}. ${e}`, "red"));
         }
+        log(`${"═".repeat(70)}\n`, "bright");
 
-        log("\n" + "═".repeat(70) + "\n", "bright");
+    } catch (err) {
+        log(`  ❌ [CANCEL] Sweep error: ${err.message}`, "red");
+        stats.errors.push(`Fatal: ${err.message}`);
+        if (page) await takeScreenshot(page, "cancel_sweep_fatal");
+    }
 
-        // Close browser (but don't close if connected to existing)
+    return stats;
+}
+
+// ========================== CLI ENTRY POINT ==========================
+
+async function main() {
+    log("\n" + "═".repeat(70), "bright");
+    log("  🚫  AUTO-CANCEL SHOWINGS", "bright");
+    log("═".repeat(70), "bright");
+    if (DRY_RUN) log("  ⚡ DRY RUN MODE — no cancellations will be performed\n", "yellow");
+    if (TARGET_ADDRESS) log(`  🎯 Address filter: "${TARGET_ADDRESS}"\n`, "cyan");
+    log(`  Targets  : ${CONFIG.targetedTags.join(", ")}`, "dim");
+    log(`  Reason   : ${CONFIG.cancelReason}`, "dim");
+    log(`  Base URL : ${CONFIG.showingsUrl}\n`, "dim");
+
+    let browser = null;
+
+    try {
+        browser = await launchWithSession({
+            headless: process.env.HEADLESS !== "false",
+            defaultViewport: CONFIG.viewport,
+        });
+
+        await runCancellationSweep(browser, {
+            dryRun: DRY_RUN,
+            addressFilter: TARGET_ADDRESS,
+        });
+
+    } catch (err) {
+        log(`\n❌ FATAL: ${err.message}`, "red");
+        log(err.stack, "dim");
+    } finally {
         if (browser) {
             try {
                 if (browser.isConnectedToExisting) {
-                    log("  ℹ️  Disconnecting from existing browser (not closing it)", "dim");
                     browser.disconnect();
+                    log("  ℹ️  Disconnected from existing browser (kept open)", "dim");
                 } else {
                     await browser.close();
                 }
@@ -1090,211 +1392,9 @@ async function main() {
     }
 }
 
-// ========================== EXPORTED API FOR WORKER ==========================
-
-/**
- * Run a cancellation sweep using a pre-existing browser instance.
- * This is the main entry point when called from the worker (not CLI).
- *
- * @param {import('puppeteer').Browser} browser - An already-connected Puppeteer browser
- * @param {Object} [options]
- * @param {boolean} [options.dryRun=false] - If true, scan but don't cancel
- * @returns {Promise<{cancelled: number, failed: number, scanned: number, errors: string[]}>}
- */
-export async function runCancellationSweep(browser, options = {}) {
-    const { dryRun = false } = options;
-    let page = null;
-
-    const stats = {
-        scanned: 0,
-        cancelled: 0,
-        skipped: 0,
-        failed: 0,
-        errors: [],
-    };
-
-    try {
-        log(`\n${'═'.repeat(70)}`, 'bright');
-        log('  🚫  [CANCEL] Auto-Cancellation Sweep Starting', 'bright');
-        log(`${'═'.repeat(70)}`, 'bright');
-        if (dryRun) {
-            log('  ⚡ DRY RUN MODE – no showings will actually be cancelled', 'yellow');
-        }
-
-        // Get or create a page from the existing browser
-        let reusedTab = false;
-
-        if (browser.isConnectedToExisting) {
-            const allPages = await browser.pages();
-            const brokerBayPage = allPages.find(p => {
-                const url = p.url();
-                return url.includes('brokerbay.com') && !url.includes('auth.brokerbay.com/login');
-            });
-
-            if (brokerBayPage) {
-                log(`  ✅ Reusing existing BrokerBay tab: ${brokerBayPage.url()}`, 'green');
-                page = brokerBayPage;
-                reusedTab = true;
-                try { await page.bringToFront(); } catch { }
-            } else {
-                page = await browser.newPage();
-            }
-        } else {
-            const allPages = await browser.pages();
-            page = allPages.length > 0 ? allPages[0] : await browser.newPage();
-        }
-
-        await page.setViewport(CONFIG.viewport);
-
-        // Validate session — graceful check: don't throw, just return early with message
-        if (!reusedTab) {
-            if (!page.url().includes('brokerbay.com')) {
-                await page.goto('https://edge.brokerbay.com/#/my_business', {
-                    waitUntil: 'domcontentloaded',
-                    timeout: CONFIG.navigationTimeout,
-                });
-                await wait(3000);
-            }
-            const sessionOk = await isSessionValid(page);
-            if (!sessionOk) {
-                log('  ❌ [CANCEL] BrokerBay session is expired or invalid in Docker.', 'red');
-                log('  ⚠️  [CANCEL] The mounted Chrome profile may have stale cookies.', 'yellow');
-                log('  💡 [CANCEL] To fix: ensure the debug-profile is freshly logged in,', 'yellow');
-                log('              then re-deploy to copy the updated session.', 'yellow');
-                stats.errors.push('Session expired — re-deploy with a fresh Chrome profile');
-                return stats; // Bail out gracefully; do not throw
-            }
-        }
-
-        // Navigate to showings
-        await navigateToShowings(page);
-
-        // Scan & Cancel Loop
-        log('  🔍 [CANCEL] Scanning for showings to cancel...', 'cyan');
-        let passNumber = 0;
-        let keepGoing = true;
-
-        while (keepGoing) {
-            passNumber++;
-            log(`\n${'─'.repeat(50)}`, 'dim');
-            log(`  🔄 [CANCEL] Pass #${passNumber}`, 'cyan');
-
-            if (passNumber > 1) {
-                await navigateToShowings(page);
-            }
-
-            const paginationPages = await getPaginationPages(page);
-            let foundAnyThisPass = false;
-
-            for (const pageNum of paginationPages) {
-                if (pageNum > 1) {
-                    await goToPage(page, pageNum);
-                    await wait(CONFIG.mediumWait);
-                }
-
-                const showings = await scanForTargetedShowings(page);
-                stats.scanned += showings.length;
-
-                if (showings.length === 0) {
-                    log(`  📄 Page ${pageNum}: No targeted showings`, 'dim');
-                    continue;
-                }
-
-                log(`  📄 Page ${pageNum}: Found ${showings.length} targeted showing(s)`, 'cyan');
-
-                for (const showing of showings) {
-                    log(`\n  ┌─ ${showing.address} [${showing.tag}]`, 'white');
-
-                    if (dryRun) {
-                        log('  └─ [DRY RUN] Would cancel', 'yellow');
-                        stats.skipped++;
-                        continue;
-                    }
-
-                    foundAnyThisPass = true;
-
-                    if (pageNum > 1) {
-                        await navigateToShowings(page);
-                        await goToPage(page, pageNum);
-                        await wait(CONFIG.mediumWait);
-                    }
-
-                    const freshShowings = await scanForTargetedShowings(page);
-                    if (freshShowings.length === 0) {
-                        log('  └─ ⚠️ No more targeted showings after re-scan', 'yellow');
-                        break;
-                    }
-
-                    const clickResult = await clickShowingByIndex(page, { ...freshShowings[0], index: 0 });
-                    if (!clickResult) {
-                        stats.failed++;
-                        stats.errors.push(`Failed to click: ${showing.address}`);
-                        continue;
-                    }
-
-                    await wait(CONFIG.mediumWait);
-                    const success = await performCancellation(page, showing);
-
-                    if (success) {
-                        stats.cancelled++;
-                        log(`  └─ ✅ Cancelled (${stats.cancelled} total)`, 'green');
-                    } else {
-                        stats.failed++;
-                        stats.errors.push(`Failed to cancel: ${showing.address}`);
-                        log('  └─ ❌ Cancellation failed', 'red');
-                    }
-
-                    await wait(CONFIG.shortWait);
-                    break; // Restart from page 1
-                }
-
-                if (foundAnyThisPass) break;
-            }
-
-            if (dryRun || !foundAnyThisPass) {
-                keepGoing = false;
-            }
-        }
-
-        // Summary
-        log(`\n${'═'.repeat(70)}`, 'bright');
-        log('  📊  [CANCEL] SWEEP SUMMARY', 'bright');
-        log(`${'═'.repeat(70)}`, 'bright');
-        log(`  Scanned : ${stats.scanned}`, 'white');
-        log(`  Cancelled: ${stats.cancelled}`, 'green');
-        log(`  Failed  : ${stats.failed}`, stats.failed > 0 ? 'red' : 'white');
-        log(`  Skipped : ${stats.skipped}`, stats.skipped > 0 ? 'yellow' : 'white');
-        if (stats.errors.length > 0) {
-            stats.errors.forEach((e, i) => log(`    ${i + 1}. ${e}`, 'red'));
-        }
-        log(`${'═'.repeat(70)}\n`, 'bright');
-
-    } catch (error) {
-        log(`  ❌ [CANCEL] Sweep error: ${error.message}`, 'red');
-        stats.errors.push(`Fatal: ${error.message}`);
-        if (page) {
-            await takeScreenshot(page, 'cancel_sweep_error');
-        }
-    }
-
-    // NOTE: We do NOT close the browser — the worker owns it
-    return stats;
-}
-
-export {
-    navigateToShowings,
-    scanForTargetedShowings,
-    performCancellation,
-    getPaginationPages,
-    goToPage,
-    clickShowingByIndex,
-    CONFIG as CANCEL_CONFIG
-};
-
-// ========================== CLI ENTRY POINT ==========================
 if (_isMainModule) {
     main().catch((err) => {
-        console.error('\n💥 Unhandled error:', err);
+        console.error("\n💥 Unhandled error:", err);
         process.exit(1);
     });
 }
